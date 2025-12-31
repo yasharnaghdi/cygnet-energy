@@ -1,0 +1,30 @@
+# Database Configuration
+database:
+  host: localhost
+  port: 5432
+  name: cygnet_energy
+  user: postgres
+  password: your_password
+
+# ENTSO-E API Configuration
+entso_e:
+  api_key: your_api_key_here
+  base_url: https://web-api.tp.entsoe.eu/api
+  max_retries: 5
+  rate_limit: 10
+
+# Service Configuration
+service:
+  log_level: INFO
+  api_port: 8000
+  api_workers: 4
+  scheduler_enabled: true
+
+# Countries to collect
+countries:
+  - DE
+
+# Data retention policy
+retention:
+  keep_years: 5
+  compression_threshold_days: 14
