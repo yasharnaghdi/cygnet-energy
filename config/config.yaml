@@ -4,7 +4,7 @@ database:
   port: 5432
   name: cygnet_energy
   user: postgres
-  password: your_password
+  password: 10o1
 
 # ENTSO-E API Configuration
 entso_e:
