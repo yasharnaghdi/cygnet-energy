@@ -13,3 +13,4 @@ logs/
 *.sqlite
 .idea/
 .vscode/
+data/samples/
