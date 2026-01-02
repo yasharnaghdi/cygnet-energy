@@ -368,15 +368,11 @@ ORDER BY time DESC;
 - [Operations Runbook](docs/OPERATIONS.md) - Daily operations procedures
 - [Contributing Guide](CONTRIBUTING.md) - Development workflow
 
-## License
-
-MIT License - See LICENSE file
 
 ## Contact & Support
 
 - **Author:** Yashar Naghdi
 - **GitHub:** [@yasharnaghdi](https://github.com/yasharnaghdi)
-- **Email:** your.email@domain.com
 - **Issues:** [GitHub Issues](https://github.com/yasharnaghdi/cygnet-energy/issues)
 
 ## Acknowledgments
