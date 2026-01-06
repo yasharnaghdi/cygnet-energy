@@ -16,3 +16,4 @@ logs/
 data/samples/
 .env*.local
 secrets.toml
+pyproject.toml

@@ -9,9 +9,9 @@ A production-grade platform that transforms ENTSO-E transparency data into actio
 
 ***
 =======
-CYGNET Energy  
-Real-time carbon intelligence on top of ENTSO-E data, built as an interview-ready engineering project.  
->>>>>>> be728bd7879cc12d72c3671e0fab1958d860f219
+CYGNET Energy
+Real-time carbon intelligence on top of ENTSO-E data, built as an interview-ready engineering project.
+
 
 ***
 
@@ -292,7 +292,6 @@ cygnet-energy/
 ## 4. Setup & Running (Poetry + venv)
 
 ### 4.1. Prerequisites
->>>>>>> be728bd7879cc12d72c3671e0fab1958d860f219
 
 - Python **3.11**
 - PostgreSQL running locally
@@ -529,14 +528,14 @@ This reads `pyproject.toml` and installs all main + dev dependencies, including 
 
 Either:
 
-- Use environment variables (`.env` + `python-dotenv`), or  
+- Use environment variables (`.env` + `python-dotenv`), or
 - Edit `config/config.yaml` and/or `settings.yaml` with:
 
 - DB host / port / name (`cygnet_energy`)
 - ENTSO-E API token
 - Debug flags
 
-The DB name you used so far is `cygnet_energy` and table `generation_actual` is populated for DE from CSV via `load_csv_to_db.py`.  
+The DB name you used so far is `cygnet_energy` and table `generation_actual` is populated for DE from CSV via `load_csv_to_db.py`.
 
 ### 4.4. Initialize the database
 
@@ -548,7 +547,7 @@ poetry run python scripts/load_csv_to_db.py
 ```
 
 - `init_db.py` creates the `generation_actual` table (and any related schema) in `cygnet_energy`.
-- `load_csv_to_db.py` loads the sample CSV into the DB (DE zone).  
+- `load_csv_to_db.py` loads the sample CSV into the DB (DE zone).
 
 ### 4.5. Run the Streamlit dashboard
 
@@ -611,7 +610,6 @@ When asked “What is this project?” you can briefly say:
 - [Database Schema](docs/SCHEMA.md) - SQL table definitions
 - [Operations Runbook](docs/OPERATIONS.md) - Daily operations procedures
 - [Contributing Guide](CONTRIBUTING.md) - Development workflow
->>>>>>> be728bd7879cc12d72c3671e0fab1958d860f219
 
 
 ## Contact & Support
@@ -621,7 +619,7 @@ When asked “What is this project?” you can briefly say:
 <<<<<<< HEAD
 - **Email:** he@yasharnaghdi.com
 =======
->>>>>>> be728bd7879cc12d72c3671e0fab1958d860f219
+
 - **Issues:** [GitHub Issues](https://github.com/yasharnaghdi/cygnet-energy/issues)
 
 ## Acknowledgments
