@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS generation_actual (
     actual_generation_mw NUMERIC(12, 3),
     quality_code VARCHAR(1) DEFAULT 'A',
     data_source VARCHAR(20) DEFAULT 'OPS',
-    ingestion_timestamp TIMESTAMPTZ DEFAULT NOW()
+    ingestion_timestamp TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (time, bidding_zone_mrid, psr_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_generation_zone_time

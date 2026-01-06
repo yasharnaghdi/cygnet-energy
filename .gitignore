@@ -14,3 +14,5 @@ logs/
 .idea/
 .vscode/
 data/samples/
+.env*.local
+secrets.toml

@@ -1,15 +1,27 @@
+[project]
+name = "cygnet-energy"
+version = "0.1.0"
+description = "European grid intelligence platform - Real-time electricity system data from ENTSO-E"
+authors = [
+    {name = "yashar.naghdi",email = "he@yasharnaghdi.com"}
+]
+readme = "README.md"
+packages = [{include = "src"}]
+keywords = ["grid", "electricity", "entso-e", "energy", "timeseries", "carbon"]
+package-mode = false
+
 [tool.poetry]
 name = "cygnet-energy"
 version = "0.1.0"
 description = "European grid intelligence platform - Real-time electricity system data from ENTSO-E"
-authors = ["Yashar Naghdi <your.email@domain.com>"]
+authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
-license = "MIT"
-repository = "https://github.com/yasharnaghdi/cygnet-energy"
-keywords = ["grid", "electricity", "entso-e", "energy", "timeseries"]
+repository = "https://github.com/.../cygnet-energy"
+keywords = ["grid", "electricity", "entso-e", "energy", "timeseries", "carbon"]
 package-mode = false
+
 [tool.poetry.dependencies]
-python = "^3.10"
+python = "^3.11"
 fastapi = "^0.109.0"
 uvicorn = {version = "^0.27.0", extras = ["standard"]}
 psycopg2-binary = "^2.9.9"
@@ -21,6 +33,12 @@ prometheus-client = "^0.19.0"
 pyyaml = "^6.0"
 python-dotenv = "^1.0.0"
 pytz = "^2024.1"
+pandas = "^2.1.0"
+numpy = "^1.26.0"
+streamlit = "^1.29.0"
+plotly = "^5.18.0"
+lxml = "^5.0.0"
+scikit-learn = "^1.3.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
@@ -30,13 +48,9 @@ black = "^23.12.0"
 ruff = "^0.1.8"
 mypy = "^1.7.0"
 httpx = "^0.25.0"
-pandas = "^2.0.0"
-numpy = "^1.24.0"
-streamlit = "^1.29.0"
-plotly = "^5.18.0"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=2.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
