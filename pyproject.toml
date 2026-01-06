@@ -14,12 +14,22 @@ package-mode = false
 name = "cygnet-energy"
 version = "0.1.0"
 description = "European grid intelligence platform - Real-time electricity system data from ENTSO-E"
+<<<<<<< HEAD
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
 repository = "https://github.com/.../cygnet-energy"
 keywords = ["grid", "electricity", "entso-e", "energy", "timeseries", "carbon"]
 package-mode = false
 
+=======
+authors = ["Yashar Naghdi <he@yasharnaghdi.com>"]
+readme = "README.md"
+repository = "https://github.com/yasharnaghdi/cygnet-energy"
+keywords = ["grid", "electricity", "entso-e", "energy", "timeseries"]
+package-mode = false
+
+
+>>>>>>> be728bd7879cc12d72c3671e0fab1958d860f219
 [tool.poetry.dependencies]
 python = "^3.11"
 fastapi = "^0.109.0"
