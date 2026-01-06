@@ -1,363 +1,249 @@
 # Cygnet Energy - European Grid Intelligence Platform
 
-**Real-time electricity system data collection and analysis from ENTSO-E Transparency Platform**
+CYGNET Energy  
+Real-time carbon intelligence on top of ENTSO-E data, built as an interview-ready engineering project.  
 
-## Project Overview
+***
 
-Cygnet Energy is a production-grade data platform for ingesting, processing, and analyzing real-time electricity grid data from 39 European countries. The system collects 15-minute interval measurements of generation, consumption, cross-border flows, and unit unavailability from the ENTSO-E Transparency Platform.
+## 1. Project Scope
 
-**Status:** MVP Phase (Germany single-zone)  
-**Target Scale:** 39 countries / 600+ cross-border pairs  
-**Data Freshness:** <60 minutes (99% achieved)  
-**API Response Time:** <5 seconds (P95)
+This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exposes it through:
 
-## Architecture
+- A **data & API layer** (FastAPI-style stack)
+- A **carbon intelligence service** that computes grid CO₂ intensity
+- A **Streamlit dashboard** for visual, interview-friendly storytelling
 
-### Technology Stack
+**Current focus:**
 
-- **Database:** PostgreSQL 14+ with TimescaleDB extension (time-series optimization)
-- **API:** FastAPI (async Python web framework)
-- **Scheduler:** APScheduler (background task scheduling)
-- **HTTP Client:** requests library with exponential backoff
-- **Validation:** Pydantic v2
-- **Monitoring:** Prometheus metrics + Grafana dashboards (Phase 2)
+- One fully populated bidding zone in DB: **DE** (Germany, from CSV)
+- Other countries (**FR, GB, ES, IT**) fetched in **real time from ENTSO-E API**
+- Clear separation between:
+  - Historical database-backed analytics (for DE)
+  - Live API-backed analytics (for other countries)
 
-### Key Components
+The project is intentionally scoped for interviews: it demonstrates data ingestion, modeling, API integration, and frontend visualization in a compact but realistic energy-data scenario.
 
+***
+
+## 2. Tech Stack
+
+### Core Languages & Runtime
+
+- **Python**: 3.11 (configured via Poetry in `pyproject.toml`)[1]
+
+### Backend & Services
+
+- **FastAPI + Uvicorn** (planned/available stack, used by scripts/tests and can be extended):
+  - FastAPI for HTTP API endpoints
+  - Uvicorn as ASGI server[1]
+- **PostgreSQL**:
+  - Stores `generation_actual` time series (actual generation by PSR type)
+  - Accessed via `psycopg2-binary` in `src/db/connection.py` and used by `CarbonIntensityService`[3]
+- **Scheduling & monitoring**:
+  - `apscheduler` for periodic ETL / API fetch jobs (via scripts)[1]
+  - `prometheus-client` for metrics (ready to plug into a FastAPI/worker process)[1]
+
+### Data & Modeling
+
+- **pandas** for time series manipulation and DataFrame-based transformations[3]
+- **numpy** for numerical operations[3]
+- **pydantic / pydantic-settings** for config and typed models (API + config structures)[1]
+- **scikit-learn** (added) for potential forecasting / modeling tasks (e.g. 24h forecast refinement)[1]
+- **lxml / xml.etree** for ENTSO-E XML parsing in `src/api/parser.py`[5]
+
+### ENTSO-E Integration
+
+- `src/api/client.py`:
+  - Wraps ENTSO-E **Transparency Platform** REST API with a typed client, handles:
+    - Security token
+    - Correct base URL
+    - Bidding zone mapping (`BIDDING_ZONES`) for DE, FR, GB, ES, IT, NL, BE[8]
+- `src/api/parser.py`:
+  - Parses **A75 actual generation** XML into a normalized DataFrame:
+    - Columns: `time`, `psr_type`, `actual_generation_mw`
+    - Correct namespace for `generationloaddocument`[5]
+
+### Carbon Intelligence Layer
+
+- `src/services/carbon_service.py`:
+  - Central service used by the dashboard and can be used by a future API[4]
+  - Responsibilities:
+    - **get_current_intensity(country)**:
+      - Try PostgreSQL for that `bidding_zone_mrid` (for DE)
+      - If no rows → call ENTSO-E API via `EntsoEAPIClient`, parse via `EntsoEXMLParser`[4][8][5]
+      - Compute:
+        - CO₂ intensity \(gCO₂/kWh\) using IPCC 2014 emission factors
+        - Renewable vs fossil shares
+        - Status bucket: LOW / MODERATE / HIGH / CRITICAL
+    - **get_24h_forecast(country)**:
+      - Uses historical DB data (DE) to build an hour-of-day average–based “profile” forecast[4]
+    - **get_green_hours(country, threshold)**:
+      - Identifies hours with intensity below a threshold, returns best/worst hours + savings potential[4]
+    - **calculate_charging_impact(num_evs, daily_charging_mwh)**:
+      - Simple, parameterized peak vs green scenario for EV fleet cost and CO₂[4]
+
+### Frontend / Visualization
+
+- **Streamlit**:
+  - Multiple entry points exist; the current main one is:
+    - `streamlit_carbon_app.py` – “Carbon Intelligence Dashboard”[6]
+  - Uses:
+    - `plotly.graph_objects` and `plotly.express` for charts[6]
+    - Responsive layout with `st.columns` for metrics and comparison views[6]
+
+**Key UI features already present:**
+
+1. **Single-country live status view** (DE or live-API countries):
+   - CO₂ intensity
+   - Renewable percentage
+   - Total generation
+   - Status indicator and timestamp[6][4]
+2. **Generation mix chart**:
+   - Horizontal bar chart showing emissions by source (using PSR names and calculated emissions)[6][4]
+3. **24-hour forecast (DE)**:
+   - Intensity curve with color bands and a 200 gCO₂/kWh “green” reference[6]
+4. **EV charging impact widget**:
+   - Compares “peak” vs “green” charging cost and CO₂ for a configurable fleet size and energy use[4][6]
+
+(You have also started adding a country comparison view; this can be documented once stabilised.)
+
+***
+
+## 3. Project Structure (High Level)
+
+```text
+cygnet-energy/
+├── config/
+│   ├── config.yaml              # App / API / DB settings templates
+│   ├── config.yaml.example
+│   └── settings.yaml
+├── data/
+│   └── samples/
+│       └── time_series_60min_singleindex.csv  # Example ENTSO-E CSV input
+├── scripts/
+│   ├── fetch_entsoe_data.py     # Fetch from ENTSO-E and store/process
+│   ├── init_db.py               # Create DB schema
+│   └── load_csv_to_db.py        # Load sample CSV into PostgreSQL
+├── src/
+│   ├── api/
+│   │   ├── client.py            # EntsoEAPIClient (HTTP client) [file:48]
+│   │   └── parser.py            # EntsoEXMLParser (XML→DataFrame) [file:45]
+│   ├── db/
+│   │   ├── connection.py        # psycopg2 connection helper
+│   │   └── schema.py            # DDL for generation_actual and related tables
+│   ├── models/
+│   │   └── generation.py        # Domain models / pydantic schemas
+│   ├── services/
+│   │   └── carbon_service.py    # CarbonIntensityService core logic [file:44]
+│   └── utils/
+│       └── config.py            # App config loader (env + yaml)
+├── streamlit_carbon_app.py      # Main dashboard for interviews [file:46]
+├── streamlit_app.py             # Earlier Streamlit variant (legacy)
+├── streamlit_minimal.py         # Minimal/experimental UI (legacy)
+├── tests/
+│   ├── unit/
+│   └── integration/
+├── pyproject.toml               # Poetry config, dependencies, Python 3.11 [file:1]
+├── README.md                    # (this file)
+└── SETUP_GUIDE.md               # More detailed step-by-step setup (already present)
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ ENTSO-E Transparency Platform (XML API)                     │
-│ - Generation Actual (GL_GenerationActual_A)                 │
-│ - Load Actual (AL_LoadData)                                 │
-│ - Physical Flows (cross-border)                             │
-│ - Unavailability (outages/maintenance)                      │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │ Data Collection Service      │
-        │ - XML parsing                │
-        │ - Rate-limit handling (429)  │
-        │ - Batch validation           │
-        │ - Error recovery             │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────────┐
-        │ TimescaleDB (PostgreSQL)         │
-        │ - 4 hypertables (7-day chunks)   │
-        │ - Compression (14d+ auto)        │
-        │ - Composite indexes              │
-        │ - ~110GB / 5 years (compressed)  │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │ REST API Layer (FastAPI)     │
-        │ - /generation/current        │
-        │ - /analysis/renewable-pct    │
-        │ - /monitoring/freshness      │
-        └──────────────────────────────┘
-                       │
-        ┌──────────────┴──────────────┐
-        ▼                             ▼
-   Analytics                     Dashboards
-   (SQL queries)                 (Grafana/UI)
-```
 
-## Quick Start
+***
 
-### Prerequisites
+## 4. Setup & Running (Poetry + venv)
 
-- Python 3.11+
-- PostgreSQL 14+ (with TimescaleDB extension)
-- Git
+### 4.1. Prerequisites
 
-### Installation
+- Python **3.11**
+- PostgreSQL running locally
+- Poetry installed globally
+
+### 4.2. Install dependencies
 
 ```bash
-# Clone repository
-git clone https://github.com/yasharnaghdi/cygnet-energy.git
-cd cygnet-energy
-
-# Create virtual environment
-python3.11 -m venv venv
-source venv/bin/activate          # macOS/Linux
-# OR
-venv\Scripts\activate            # Windows
-
-# Install dependencies
-pip install poetry
+# From project root
 poetry install
-
-# Configure environment
-cp config/config.yaml.example config/config.yaml
-# Edit config.yaml with your ENTSO-E API key and database credentials
-
-# Run database schema initialization
-python scripts/init_db.py
-
-# Start data collection service
-python -m src.collector.main
-
-# In another terminal, start API server
-python -m uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Verify Installation
+This reads `pyproject.toml` and installs all main + dev dependencies, including FastAPI, psycopg2, pandas, numpy, streamlit, plotly, scikit-learn, etc.[1]
+
+### 4.3. Environment / Config
+
+Either:
+
+- Use environment variables (`.env` + `python-dotenv`), or  
+- Edit `config/config.yaml` and/or `settings.yaml` with:
+
+- DB host / port / name (`cygnet_energy`)
+- ENTSO-E API token
+- Debug flags
+
+The DB name you used so far is `cygnet_energy` and table `generation_actual` is populated for DE from CSV via `load_csv_to_db.py`.  
+
+### 4.4. Initialize the database
+
+From the project root:
 
 ```bash
-# Check API health
-curl http://localhost:8000/health
-
-# Fetch latest generation data (Germany)
-curl "http://localhost:8000/api/v1/generation/current?bidding_zone=DE"
-
-# Get renewable penetration (last 24 hours)
-curl "http://localhost:8000/api/v1/analysis/renewable-fraction?bidding_zone=DE&hours=24"
+poetry run python scripts/init_db.py
+poetry run python scripts/load_csv_to_db.py
 ```
 
-## Configuration
+- `init_db.py` creates the `generation_actual` table (and any related schema) in `cygnet_energy`.
+- `load_csv_to_db.py` loads the sample CSV into the DB (DE zone).  
 
-### Environment Variables
+### 4.5. Run the Streamlit dashboard
 
 ```bash
-# Database
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=cygnet_energy
-DB_USER=postgres
-DB_PASSWORD=your_password
-
-# ENTSO-E API
-ENTSO_API_KEY=your_api_key_from_transparency_platform
-ENTSO_MAX_RETRIES=5
-ENTSO_RATE_LIMIT=10  # requests per second
-
-# Service
-LOG_LEVEL=INFO
-API_PORT=8000
-API_WORKERS=4
+poetry run streamlit run streamlit_carbon_app.py
 ```
 
-### Database Configuration
+Open the URL shown in the terminal (typically `http://localhost:8501`).[6]
 
-**PostgreSQL Instance Sizing (Production):**
+You should be able to:
 
-| Component | Recommendation | Notes |
-|-----------|----------------|-------|
-| CPU | 8 cores | Scale to 16 for >1000 concurrent users |
-| Memory | 32 GB | 25% shared buffers, 75% OS cache |
-| Storage | 500 GB SSD | 300 GB data, 50 GB WAL, 150 GB backups |
-| Retention | 5 years | Automatic purge of data >5 years old |
+- Select **DE** and see DB-driven metrics and forecast
+- Select **FR/GB/ES/IT** and see live API data via `EntsoEAPIClient` + `EntsoEXMLParser` + `CarbonIntensityService`[8][5][4]
 
-**TimescaleDB Chunk Strategy:**
+***
 
-- Chunk interval: 7 days (balance compression vs. query overhead)
-- Compression threshold: 14 days (automatic)
-- Compression ratio: 10-20x for repetitive numeric data
-- Estimated size: 110 GB / 5 years (compressed from 550 GB raw)
+## 5. Current Features (Interview-Ready)
 
-## Data Schema
+### 5.1. Data & Integration
 
-### Hypertables (Time-Series)
+- **PostgreSQL-backed historical data** for one zone (DE) from ENTSO-E CSV, via scripts in `scripts/` and `src/db/`[3]
+- **Live ENTSO-E API integration** with:
+  - Correct bidding zone mapping
+  - Robust XML parsing
+  - Integration into the main `CarbonIntensityService` path as a fallback when DB has no rows[5][8][4]
 
-```sql
-generation_actual      -- Generation by zone & type (15-min intervals)
-load_actual            -- Consumption by zone (15-min intervals)
-crossborder_flows      -- Flows between zones (15-min intervals)
-unavailability_units   -- Generator outages (variable frequency)
-```
+### 5.2. Carbon Intelligence Logic
 
-### Metadata Tables
+- **IPCC 2014-based emission factors** per PSR code, encapsulated in `CarbonIntensityService.EMISSION_FACTORS`[4]
+- Computation of:
+  - Grid CO₂ intensity (weighted by generation mix)
+  - Renewable vs fossil shares
+  - Hourly forecast using historical patterns
+  - “Green hours” based on intensity thresholds
+  - EV fleet peak vs green charging scenarios in terms of both cost and emissions[4]
 
-```sql
-metadata               -- Zone/generator master data (non-hypertable)
-```
+### 5.3. Frontend UX (Streamlit)
 
-## API Endpoints
+- Live status KPIs
+- Generation mix visualization
+- 24-hour intensity forecast with thresholds
+- EV charging impact widget
+- WIP: multi-country comparison mode (side-by-side metrics, intensity bar chart, rankings)
 
-### Generation
+***
 
-```
-GET /api/v1/generation/current
-GET /api/v1/generation/history?bidding_zone=DE&hours=24
-POST /api/v1/generation/forecast?bidding_zone=DE&horizon_hours=6
-```
+## 6. How to Talk About This in an Interview
 
-### Analysis
+When asked “What is this project?” you can briefly say:
 
-```
-GET /api/v1/analysis/renewable-fraction?hours=24
-GET /api/v1/analysis/grid-stress?bidding_zone=DE
-GET /api/v1/analysis/demand-forecast?bidding_zone=DE
-```
+- *“It’s a European grid intelligence project that combines PostgreSQL, an ENTSO-E API client, and a carbon-intensity service exposed via a Streamlit dashboard. For Germany, I load historical generation data into PostgreSQL, and for other countries I fetch real-time data from the ENTSO-E Transparency Platform. On top of that I compute grid CO₂ intensity, renewable shares, and EV charging cost/emissions scenarios, and visualize them in a dashboard. The stack uses Python 3.11, Poetry, psycopg2, pandas, and a layered design (API client → parser → service → UI).”*
 
-### Monitoring
 
-```
-GET /api/v1/monitoring/freshness
-GET /api/v1/monitoring/anomalies?hours=24
-GET /health
-```
-
-## Development
-
-### Running Tests
-
-```bash
-# Unit tests
-pytest tests/unit/ -v
-
-# Integration tests (requires running database)
-pytest tests/integration/ -v
-
-# With coverage report
-pytest --cov=src --cov-report=html
-```
-
-### Code Quality
-
-```bash
-# Format code
-black src/ tests/
-
-# Lint
-ruff check src/ tests/
-
-# Type checking
-mypy src/
-
-# All checks
-bash scripts/lint.sh
-```
-
-### Docker Build
-
-```bash
-# Build image
-docker build -t cygnet-energy:latest .
-
-# Run container
-docker run -p 8000:8000 \
-  -e DB_HOST=postgres \
-  -e ENTSO_API_KEY=your_key \
-  cygnet-energy:latest
-```
-
-## Monitoring
-
-### Prometheus Metrics
-
-Key metrics for monitoring:
-
-- `entso_api_requests_total` - API call count (success/failure)
-- `entso_api_request_duration_seconds` - Collection latency
-- `database_insertion_lag_seconds` - Data freshness
-- `data_freshness_seconds` - Age of latest record per zone
-- `collection_job_duration_seconds` - Collection job performance
-- `api_query_latency_seconds` - REST API response time
-
-### Alerting Rules
-
-```yaml
-# Data Staleness Alert
-- alert: DataStaleness
-  expr: data_freshness_seconds > 3600
-  for: 10m
-  annotations:
-    summary: "Zone {{ $labels.bidding_zone }} stale for >1 hour"
-
-# API Error Rate
-- alert: APIErrorRate
-  expr: rate(entso_api_requests_total{status=~"5.."}[5m]) > 0.1
-  annotations:
-    summary: "ENTSO-E API error rate >10%"
-
-# Collection Delay
-- alert: SlowCollection
-  expr: collection_job_duration_seconds > 300
-  annotations:
-    summary: "Collection job exceeds 5 minutes"
-```
-
-## Project Phases
-
-### Phase 1: MVP (Current)
-- [x] Single country (Germany) data collection
-- [x] Database schema & TimescaleDB setup
-- [x] ENTSO-E API integration
-- [x] Basic FastAPI endpoints
-- [ ] Unit & integration tests (80%+ coverage)
-- [ ] Docker containerization
-
-### Phase 2: Multi-Country
-- [ ] Extend to 39 countries
-- [ ] SMARD fallback (German data redundancy)
-- [ ] Advanced analytics & aggregations
-- [ ] Grafana dashboard
-- [ ] CI/CD pipeline (GitHub Actions)
-
-### Phase 3: Intelligence
-- [ ] Weather integration (wind/solar forecasting)
-- [ ] Machine learning anomaly detection
-- [ ] ARIMA/Prophet demand forecasting
-- [ ] Carbon intensity calculation
-
-### Phase 4: Scalability
-- [ ] Kubernetes deployment
-- [ ] Distributed scheduler (Celery + Redis)
-- [ ] Event streaming (WebSocket, <1-min latency)
-- [ ] Multi-region support
-
-### Phase 5: Production
-- [ ] Enterprise security (OAuth2, mTLS)
-- [ ] Usage billing & quotas
-- [ ] SLA monitoring
-- [ ] Regulatory compliance (GDPR, energy regulations)
-
-## Troubleshooting
-
-### Data Collection Not Running
-
-```bash
-# Check logs
-tail -f logs/collector.log
-
-# Verify database connection
-python -c "from src.db.connection import test_connection; test_connection()"
-
-# Test ENTSO-E API connectivity
-curl -I "https://web-api.tp.entsoe.eu/api/GL_GenerationActual_A?securityToken=YOUR_KEY"
-```
-
-### Database Connection Issues
-
-```bash
-# Test PostgreSQL connection
-psql -h localhost -U postgres -d cygnet_energy -c "SELECT version();"
-
-# Check TimescaleDB extension
-psql -d cygnet_energy -c "SELECT * FROM pg_extension WHERE extname = 'timescaledb';"
-
-# Verify hypertables
-psql -d cygnet_energy -c "SELECT * FROM timescaledb_information.hypertables;"
-```
-
-### Performance Optimization
-
-```sql
--- Check index usage
-SELECT schemaname, tablename, indexname, idx_scan
-FROM pg_stat_user_indexes
-ORDER BY idx_scan DESC;
-
--- Analyze query performance
-EXPLAIN ANALYZE
-SELECT * FROM generation_actual
-WHERE bidding_zone_mrid = 'DE'
-  AND time > now() - interval '24 hours'
-ORDER BY time DESC;
 ```
 
 ## Documentation
