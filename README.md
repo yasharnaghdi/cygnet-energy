@@ -1,6 +1,5 @@
 # Cygnet Energy - European Grid Intelligence Platform
 
-<<<<<<< HEAD
 # CYGNET Energy
 
 **Real-time carbon intelligence for European electricity grids**
@@ -14,8 +13,6 @@ Real-time carbon intelligence on top of ENTSO-E data, built as an interview-read
 
 
 ***
-
-<<<<<<< HEAD
 CYGNET Energy is a comprehensive grid intelligence platform that:
 
 - **Ingests** real-time and historical generation data from ENTSO-E Transparency Platform
@@ -300,9 +297,8 @@ cygnet-energy/
 ### 4.2. Install dependencies
 
 ```bash
-<<<<<<< HEAD
 # Clone repository
-git clone https://github.com/yourusername/cygnet-energy.git
+git clone https://github.com/yasharnaghdi/cygnet-energy.git
 cd cygnet-energy
 
 # Install dependencies
@@ -616,7 +612,6 @@ When asked “What is this project?” you can briefly say:
 
 - **Author:** Yashar Naghdi
 - **GitHub:** [@yasharnaghdi](https://github.com/yasharnaghdi)
-<<<<<<< HEAD
 - **Email:** he@yasharnaghdi.com
 =======
 
