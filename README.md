@@ -9,7 +9,7 @@ A production-grade platform that transforms ENTSO-E transparency data into actio
 ***
 =======
 CYGNET Energy
-Real-time carbon intelligence on top of ENTSO-E data, built as an interview-ready engineering project.
+Real-time carbon intelligence on top of ENTSO-E data
 
 
 ***
@@ -147,7 +147,7 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
 
 - A **data & API layer** (FastAPI-style stack)
 - A **carbon intelligence service** that computes grid CO₂ intensity
-- A **Streamlit dashboard** for visual, interview-friendly storytelling
+- A **Streamlit dashboard** for visual, storytelling
 
 **Current focus:**
 
@@ -157,7 +157,7 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
   - Historical database-backed analytics (for DE)
   - Live API-backed analytics (for other countries)
 
-The project is intentionally scoped for interviews: it demonstrates data ingestion, modeling, API integration, and frontend visualization in a compact but realistic energy-data scenario.
+
 
 ***
 
@@ -273,7 +273,7 @@ cygnet-energy/
 │   │   └── carbon_service.py    # CarbonIntensityService core logic [file:44]
 │   └── utils/
 │       └── config.py            # App config loader (env + yaml)
-├── streamlit_carbon_app.py      # Main dashboard for interviews [file:46]
+├── streamlit_carbon_app.py      # Main dashboard
 ├── streamlit_app.py             # Earlier Streamlit variant (legacy)
 ├── streamlit_minimal.py         # Minimal/experimental UI (legacy)
 ├── tests/
