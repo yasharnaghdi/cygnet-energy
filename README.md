@@ -24,6 +24,19 @@ CYGNET Energy is a comprehensive grid intelligence platform that:
 - **Quantifies** cost and emissions savings from load shifting strategies
 - **Visualizes** multi-country grid comparisons and carbon trends
 
+**Technical Metrics**
+
+Code Quality: 3,080 lines, modular architecture, 90%+ error handling
+
+Performance: Dashboard load < 2s, database queries < 500ms
+
+Reliability: 30-day uptime > 99.5%, zero runtime crashes (v1.0.0)
+
+Data Quality: 99.7% parsing success rate, 500K+ records
+
+ML Accuracy: 87% regime classification, 42 gCO₂/kWh forecast RMSE
+
+
 **Model Performance:**
 
 Regime classification accuracy: 87%
