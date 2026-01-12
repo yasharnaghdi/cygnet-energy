@@ -10,6 +10,8 @@ A production-grade platform that transforms ENTSO-E transparency data into actio
 
 CYGNET Energy
 Real-time carbon intelligence on top of ENTSO-E data
+<img width="1385" height="673" alt="image" src="https://github.com/user-attachments/assets/1cd720ec-356a-4ac7-811c-c17a6526a4bf" />
+
 
 
 ***
@@ -73,12 +75,12 @@ CYGNET addresses a critical gap in European energy markets: **grid carbon intens
 - Schema designed for multi-country expansion
 
 **ENTSO-E Integration**
-- `src/api/client.py`: HTTP client with bidding zone mapping (DE, FR, GB, ES, IT, NL, BE)
-- `src/api/parser.py`: XML→DataFrame transformer with correct namespace handling
-- Automatic fallback: database-first for speed, API for coverage
+- `src/api/client.py`: HTTP client with bidding zone mapping (DE, FR, GB, ES, IT, NL, BE)[1]
+- `src/api/parser.py`: XML→DataFrame transformer with correct namespace handling[2]
+- Automatic fallback: database-first for speed, API for coverage[3]
 
 ### Service Layer
-**CarbonIntensityService** (`src/services/carbon_service.py`)
+**CarbonIntensityService** (`src/services/carbon_service.py`)[3]
 
 Core capabilities:
 - **`get_current_intensity(country)`**: Hybrid query (DB + API fallback)
@@ -92,20 +94,20 @@ Core capabilities:
 - Renewable classification logic for accurate green/fossil split
 
 ### Application Layer
-**Streamlit Dashboard** (`streamlit_carbon_app.py`)
+**Streamlit Dashboard** (`streamlit_carbon_app.py`)[4]
 - Plotly-based interactive visualizations
 - Responsive multi-column layouts
 - Real-time data refresh with caching
 - Multi-country comparison mode (WIP)
 
 **Extensible API Foundation**
-- FastAPI + Uvicorn stack configured in dependencies
+- FastAPI + Uvicorn stack configured in dependencies[5]
 - Pydantic models for type-safe request/response schemas
 - APScheduler for periodic ETL jobs
 - Prometheus-ready metrics endpoints
 
 ### Development Stack
-**Python 3.11** managed via **Poetry**
+**Python 3.11** managed via **Poetry**[5]
 
 Key dependencies:
 ```
@@ -133,22 +135,22 @@ cygnet-energy/
 │   └── fetch_entsoe_data.py     # Live API data collector
 ├── src/
 │   ├── api/
-│   │   ├── client.py            # ENTSO-E HTTP client [file:48]
-│   │   └── parser.py            # XML parsing layer [file:45]
+│   │   ├── client.py            # ENTSO-E HTTP client
+│   │   └── parser.py            # XML parsing layer
 │   ├── db/
 │   │   ├── connection.py        # PostgreSQL connection pool
 │   │   └── schema.py            # DDL definitions
 │   ├── services/
-│   │   └── carbon_service.py    # Core carbon intelligence [file:44]
+│   │   └── carbon_service.py    # Core carbon intelligence
 │   ├── models/
 │   │   └── generation.py        # Domain models
 │   └── utils/
 │       └── config.py            # Configuration loader
-├── streamlit_carbon_app.py      # Production dashboard [file:46]
+├── streamlit_carbon_app.py      # Production dashboard
 ├── tests/
 │   ├── unit/                    # Service layer tests
 │   └── integration/             # API + DB tests
-├── pyproject.toml               # Poetry dependency manifest [file:1]
+├── pyproject.toml               # Poetry dependency manifest
 └── README.md
 ```
 
@@ -185,28 +187,27 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
 
 ### Core Languages & Runtime
 
-- **Python**: 3.11 (configured via Poetry in `pyproject.toml`)
+- **Python**: 3.11 (configured via Poetry in `pyproject.toml`)[1]
 
 ### Backend & Services
 
 - **FastAPI + Uvicorn** (planned/available stack, used by scripts/tests and can be extended):
   - FastAPI for HTTP API endpoints
-  - Uvicorn as ASGI server
-
+  - Uvicorn as ASGI server[1]
 - **PostgreSQL**:
   - Stores `generation_actual` time series (actual generation by PSR type)
-  - Accessed via `psycopg2-binary` in `src/db/connection.py` and used by `CarbonIntensityService`
+  - Accessed via `psycopg2-binary` in `src/db/connection.py` and used by `CarbonIntensityService`[3]
 - **Scheduling & monitoring**:
-  - `apscheduler` for periodic ETL / API fetch jobs (via scripts)
-  - `prometheus-client` for metrics (ready to plug into a FastAPI/worker process)
+  - `apscheduler` for periodic ETL / API fetch jobs (via scripts)[1]
+  - `prometheus-client` for metrics (ready to plug into a FastAPI/worker process)[1]
 
 ### Data & Modeling
 
-- **pandas** for time series manipulation and DataFrame-based transformations
-- **numpy** for numerical operations
-- **pydantic / pydantic-settings** for config and typed models (API + config structures)
-- **scikit-learn** (added) for potential forecasting / modeling tasks (e.g. 24h forecast refinement)
-- **lxml / xml.etree** for ENTSO-E XML parsing in `src/api/parser.py`
+- **pandas** for time series manipulation and DataFrame-based transformations[3]
+- **numpy** for numerical operations[3]
+- **pydantic / pydantic-settings** for config and typed models (API + config structures)[1]
+- **scikit-learn** (added) for potential forecasting / modeling tasks (e.g. 24h forecast refinement)[1]
+- **lxml / xml.etree** for ENTSO-E XML parsing in `src/api/parser.py`[5]
 
 ### ENTSO-E Integration
 
@@ -214,39 +215,39 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
   - Wraps ENTSO-E **Transparency Platform** REST API with a typed client, handles:
     - Security token
     - Correct base URL
-    - Bidding zone mapping (`BIDDING_ZONES`) for DE, FR, GB, ES, IT, NL, BE
+    - Bidding zone mapping (`BIDDING_ZONES`) for DE, FR, GB, ES, IT, NL, BE[8]
 - `src/api/parser.py`:
   - Parses **A75 actual generation** XML into a normalized DataFrame:
     - Columns: `time`, `psr_type`, `actual_generation_mw`
-    - Correct namespace for `generationloaddocument`
+    - Correct namespace for `generationloaddocument`[5]
 
 ### Carbon Intelligence Layer
 
 - `src/services/carbon_service.py`:
-  - Central service used by the dashboard and can be used by a future API
+  - Central service used by the dashboard and can be used by a future API[4]
   - Responsibilities:
     - **get_current_intensity(country)**:
       - Try PostgreSQL for that `bidding_zone_mrid` (for DE)
-      - If no rows → call ENTSO-E API via `EntsoEAPIClient`, parse via `EntsoEXMLParser`
+      - If no rows → call ENTSO-E API via `EntsoEAPIClient`, parse via `EntsoEXMLParser`[4][8][5]
       - Compute:
         - CO₂ intensity \(gCO₂/kWh\) using IPCC 2014 emission factors
         - Renewable vs fossil shares
         - Status bucket: LOW / MODERATE / HIGH / CRITICAL
     - **get_24h_forecast(country)**:
-      - Uses historical DB data (DE) to build an hour-of-day average–based “profile” forecast
+      - Uses historical DB data (DE) to build an hour-of-day average–based “profile” forecast[4]
     - **get_green_hours(country, threshold)**:
-      - Identifies hours with intensity below a threshold, returns best/worst hours + savings potential
+      - Identifies hours with intensity below a threshold, returns best/worst hours + savings potential[4]
     - **calculate_charging_impact(num_evs, daily_charging_mwh)**:
-      - Simple, parameterized peak vs green scenario for EV fleet cost and CO₂
+      - Simple, parameterized peak vs green scenario for EV fleet cost and CO₂[4]
 
 ### Frontend / Visualization
 
 - **Streamlit**:
   - Multiple entry points exist; the current main one is:
-    - `streamlit_carbon_app.py` – “Carbon Intelligence Dashboard”
+    - `streamlit_carbon_app.py` – “Carbon Intelligence Dashboard”[6]
   - Uses:
-    - `plotly.graph_objects` and `plotly.express` for charts
-    - Responsive layout with `st.columns` for metrics and comparison views
+    - `plotly.graph_objects` and `plotly.express` for charts[6]
+    - Responsive layout with `st.columns` for metrics and comparison views[6]
 
 **Key UI features already present:**
 
@@ -254,13 +255,13 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
    - CO₂ intensity
    - Renewable percentage
    - Total generation
-   - Status indicator and timestamp
+   - Status indicator and timestamp[6][4]
 2. **Generation mix chart**:
-   - Horizontal bar chart showing emissions by source (using PSR names and calculated emissions)
+   - Horizontal bar chart showing emissions by source (using PSR names and calculated emissions)[6][4]
 3. **24-hour forecast (DE)**:
-   - Intensity curve with color bands and a 200 gCO₂/kWh “green” reference
+   - Intensity curve with color bands and a 200 gCO₂/kWh “green” reference[6]
 4. **EV charging impact widget**:
-   - Compares “peak” vs “green” charging cost and CO₂ for a configurable fleet size and energy use
+   - Compares “peak” vs “green” charging cost and CO₂ for a configurable fleet size and energy use[4][6]
 
 (You have also started adding a country comparison view; this can be documented once stabilised.)
 
@@ -283,15 +284,15 @@ cygnet-energy/
 │   └── load_csv_to_db.py        # Load sample CSV into PostgreSQL
 ├── src/
 │   ├── api/
-│   │   ├── client.py            # EntsoEAPIClient (HTTP client) [file:48]
-│   │   └── parser.py            # EntsoEXMLParser (XML→DataFrame) [file:45]
+│   │   ├── client.py            # EntsoEAPIClient (HTTP client)
+│   │   └── parser.py            # EntsoEXMLParser (XML→DataFrame)
 │   ├── db/
 │   │   ├── connection.py        # psycopg2 connection helper
 │   │   └── schema.py            # DDL for generation_actual and related tables
 │   ├── models/
 │   │   └── generation.py        # Domain models / pydantic schemas
 │   ├── services/
-│   │   └── carbon_service.py    # CarbonIntensityService core logic [file:44]
+│   │   └── carbon_service.py    # CarbonIntensityService core logic
 │   └── utils/
 │       └── config.py            # App config loader (env + yaml)
 ├── streamlit_carbon_app.py      # Main dashboard
@@ -300,7 +301,7 @@ cygnet-energy/
 ├── tests/
 │   ├── unit/
 │   └── integration/
-├── pyproject.toml               # Poetry config, dependencies, Python 3.11 [file:1]
+├── pyproject.toml               # Poetry config, dependencies, Python 3.11
 ├── README.md                    # (this file)
 └── SETUP_GUIDE.md               # More detailed step-by-step setup (already present)
 ```
@@ -380,7 +381,7 @@ docker run -p 8501:8501 -e DB_HOST=your-db cygnet-energy
 - Nuclear (B14): 12
 - Hydro (B10-B12): 24
 
-Source: IPCC 2014 Fifth Assessment Report
+Source: IPCC 2014 Fifth Assessment Report[3]
 
 ### API Integration Architecture
 
@@ -478,7 +479,7 @@ poetry run pytest tests/unit/
 poetry run pytest tests/integration/
 ```
 
-**Test configuration** in `pyproject.toml`:
+**Test configuration** in `pyproject.toml`:[5]
 - Minimum coverage: 80% (aspirational)
 - pytest-asyncio for async API tests
 - pytest-cov for coverage metrics
@@ -519,10 +520,10 @@ poetry run pytest tests/integration/
 
 ##  References
 
-- [ENTSO-E Transparency Platform](https://transparency.entsoe.eu)
-- [ENTSO-E API Documentation](https://transparency.entsoe.eu/content/static_content/Static%20content/web%20api/Guide.html)
+- [ENTSO-E Transparency Platform](https://transparency.entsoe.eu)[6]
+- [ENTSO-E API Documentation](https://transparency.entsoe.eu/content/static_content/Static%20content/web%20api/Guide.html)[7]
 - [IPCC 2014 Emission Factors](https://www.ipcc.ch/report/ar5/wg3/)
-- [EEA Greenhouse Gas Indicators](https://www.eea.europa.eu/en/analysis/indicators/greenhouse-gas-emission-intensity-of-1/greenhouse-gas-emission-intensity)
+- [EEA Greenhouse Gas Indicators](https://www.eea.europa.eu/en/analysis/indicators/greenhouse-gas-emission-intensity-of-1/greenhouse-gas-emission-intensity)[8]
 
 ***
 ##  Contributing
@@ -533,7 +534,7 @@ This is a flagship demonstration project. For production use cases or enterprise
 poetry install
 ```
 
-This reads `pyproject.toml` and installs all main + dev dependencies, including FastAPI, psycopg2, pandas, numpy, streamlit, plotly, scikit-learn, etc.
+This reads `pyproject.toml` and installs all main + dev dependencies, including FastAPI, psycopg2, pandas, numpy, streamlit, plotly, scikit-learn, etc.[1]
 
 ### 4.3. Environment / Config
 
@@ -566,34 +567,34 @@ poetry run python scripts/load_csv_to_db.py
 poetry run streamlit run streamlit_carbon_app.py
 ```
 
-Open the URL shown in the terminal (typically `http://localhost:8501`).
+Open the URL shown in the terminal (typically `http://localhost:8501`).[6]
 
 You should be able to:
 
 - Select **DE** and see DB-driven metrics and forecast
-- Select **FR/GB/ES/IT** and see live API data via `EntsoEAPIClient` + `EntsoEXMLParser` + `CarbonIntensityService`
+- Select **FR/GB/ES/IT** and see live API data via `EntsoEAPIClient` + `EntsoEXMLParser` + `CarbonIntensityService`[8][5][4]
 
 ***
 
-## 5. Current Features (Interview-Ready)
+## 5. Current Features
 
 ### 5.1. Data & Integration
 
-- **PostgreSQL-backed historical data** for one zone (DE) from ENTSO-E CSV, via scripts in `scripts/` and `src/db/`
+- **PostgreSQL-backed historical data** for one zone (DE) from ENTSO-E CSV, via scripts in `scripts/` and `src/db/`[3]
 - **Live ENTSO-E API integration** with:
   - Correct bidding zone mapping
   - Robust XML parsing
-  - Integration into the main `CarbonIntensityService` path as a fallback when DB has no rows
+  - Integration into the main `CarbonIntensityService` path as a fallback when DB has no rows[5][8][4]
 
 ### 5.2. Carbon Intelligence Logic
 
-- **IPCC 2014-based emission factors** per PSR code, encapsulated in `CarbonIntensityService.EMISSION_FACTORS`
+- **IPCC 2014-based emission factors** per PSR code, encapsulated in `CarbonIntensityService.EMISSION_FACTORS`[4]
 - Computation of:
   - Grid CO₂ intensity (weighted by generation mix)
   - Renewable vs fossil shares
   - Hourly forecast using historical patterns
   - “Green hours” based on intensity thresholds
-  - EV fleet peak vs green charging scenarios in terms of both cost and emissions
+  - EV fleet peak vs green charging scenarios in terms of both cost and emissions[4]
 
 ### 5.3. Frontend UX (Streamlit)
 
@@ -604,15 +605,6 @@ You should be able to:
 - WIP: multi-country comparison mode (side-by-side metrics, intensity bar chart, rankings)
 
 ***
-
-## 6. How to Talk About This in an Interview
-
-When asked “What is this project?” you can briefly say:
-
-- *“It’s a European grid intelligence project that combines PostgreSQL, an ENTSO-E API client, and a carbon-intensity service exposed via a Streamlit dashboard. For Germany, I load historical generation data into PostgreSQL, and for other countries I fetch real-time data from the ENTSO-E Transparency Platform. On top of that I compute grid CO₂ intensity, renewable shares, and EV charging cost/emissions scenarios, and visualize them in a dashboard. The stack uses Python 3.11, Poetry, psycopg2, pandas, and a layered design (API client → parser → service → UI).”*
-
-
-```
 
 ## Documentation
 
