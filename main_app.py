@@ -36,6 +36,7 @@ except Exception:
 st.set_page_config(
     page_title="CYGNET Energy - Grid Intelligence Platform",
     layout="wide",
+    page_icon="🌍",
     initial_sidebar_state="expanded",
 )
 
@@ -513,61 +514,68 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
 
             st.divider()
 
-            # EV Fleet Charging Optimizer
-            st.markdown("### EV Fleet Charging Optimizer")
+    # ------------------------------------------------------------------
+    # EV Fleet Charging Optimizer
+    # ------------------------------------------------------------------
 
-            with st.form("ev_calculator"):
-                col1, col2, col3 = st.columns(3)
+            st.markdown("## EV Fleet Charging Optimizer")
+            st.markdown(
+                "Optimize charging windows for large EV fleets based on carbon and price signals."
+            )
 
-                with col1:
-                    num_evs = st.slider("Number of Electric Vehicles", 1, 10000, 100)
+            green_data = service.get_green_hours(country, threshold=200)
 
-                with col2:
-                    daily_mwh = st.slider("Daily charging per EV (MWh)", 0.1, 5.0, 2.0)
+            if not green_data:
+                st.info("No green-hour optimization data available for this zone yet.")
+                return
 
-                with col3:
-                    st.write("")
-                    st.write("")
+            # Safely unpack with .get() everywhere to avoid KeyError
+            best = (green_data.get("best_hour") or {})
+            worst_list = green_data.get("worst_hours") or []
+            worst = worst_list[0] if worst_list else {}
 
-                submitted = st.form_submit_button("Calculate Savings", use_container_width=True)
+            savings = green_data.get("savings_potential") or {}
+            monthly = savings.get("monthly_savings") or {}
 
-            if submitted:
-                impact = service.calculate_charging_impact(num_evs, daily_mwh)
+            # Safe fallbacks
+            best_time = best.get("timestamp")
+            best_time_str = best_time.strftime("%H:%M") if best_time else "N/A"
+            best_intensity = int(best.get("co2_intensity", 0))
+            best_renew = int(best.get("renewable_pct", 0))
 
-                col1, col2 = st.columns(2)
+            worst_time = worst.get("timestamp")
+            worst_time_str = worst_time.strftime("%H:%M") if worst_time else "N/A"
+            worst_intensity = int(worst.get("co2_intensity", 0))
+            worst_renew = int(worst.get("renewable_pct", 0))
 
-                with col1:
-                    st.markdown("#### Peak Hour Charging (Baseline)")
-                    st.metric("Monthly Cost", f"€{impact['scenario_peak']['monthly_cost']:,.0f}")
-                    st.metric("Monthly Emissions", f"{impact['scenario_peak']['monthly_emissions_tons']:.0f} tons CO₂")
-                    st.write(f"{impact['scenario_peak']['monthly_emissions_description']}")
+            co2_reduction_pct = savings.get("co2_reduction_pct", 0)
+            cost_reduction_pct = savings.get("cost_reduction_pct", 0)
 
-                with col2:
-                    st.markdown("#### Green Hour Charging (Optimized)")
-                    st.metric("Monthly Cost", f"€{impact['scenario_green']['monthly_cost']:,.0f}")
-                    st.metric("Monthly Emissions", f"{impact['scenario_green']['monthly_emissions_tons']:.0f} tons CO₂")
-                    st.write(f"{impact['scenario_green']['monthly_emissions_description']}")
+            emissions_desc = monthly.get("emissions_description") or "Carbon savings estimate unavailable."
+            cost_desc = monthly.get("cost_description") or "Cost savings estimate unavailable."
 
-                st.divider()
+            col1, col2, col3 = st.columns(3)
 
-                col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("### Best Charging Window")
+                st.metric("Start time", best_time_str)
+                st.metric("CO₂ intensity", f"{best_intensity} gCO₂/kWh")
+                st.metric("Renewable share", f"{best_renew}%")
 
-                with col1:
-                    st.markdown("#### MONTHLY SAVINGS")
-                    st.metric("Cost", f"€{impact['monthly_savings']['cost']:,.0f}")
-                    st.metric("% Reduction", f"{impact['monthly_savings']['cost_pct']:.0f}%")
+            with col2:
+                st.markdown("### Worst Charging Window")
+                st.metric("Start time", worst_time_str)
+                st.metric("CO₂ intensity", f"{worst_intensity} gCO₂/kWh")
+                st.metric("Renewable share", f"{worst_renew}%")
 
-                with col2:
-                    st.markdown("#### EMISSIONS PREVENTED")
-                    st.metric("CO₂ Tons", f"{impact['monthly_savings']['emissions_tons']:.0f}")
-                    st.metric("% Reduction", f"{impact['monthly_savings']['emissions_pct']:.0f}%")
+            with col3:
+                st.markdown("### Monthly Savings Potential")
+                st.metric("CO₂ reduction", f"{co2_reduction_pct:.0f}%")
+                st.metric("Cost reduction", f"{cost_reduction_pct:.0f}%")
 
-                with col3:
-                    st.markdown("#### ENVIRONMENTAL IMPACT")
-                    st.metric(
-                        "Equivalent",
-                        f"{impact['monthly_savings']['emissions_description']}"
-                    )
+            st.markdown("#### Impact Narrative")
+            st.write(emissions_desc)
+            st.write(cost_desc)
 
 
 def render_generation_analytics(country, start_date, end_date):
