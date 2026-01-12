@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: cygnet-postgres
+    environment:
+      POSTGRES_USER: cygnet
+      POSTGRES_PASSWORD: cygnet_password
+      POSTGRES_DB: energy_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./src/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cygnet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cygnet-network
+
+  # Streamlit Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cygnet-app
+    ports:
+      - "8501:8501"
+    environment:
+      # Database connection
+      DATABASE_URL: postgresql://cygnet:cygnet_password@postgres:5432/energy_db
+
+      # ENTSO-E API (add your token)
+      ENTSOE_API_TOKEN: ${ENTSOE_API_TOKEN:-your-token-here}
+
+      # Python environment
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # Mount source for development (optional - remove for production)
+      - ./src:/app/src
+      - ./data:/app/data
+    networks:
+      - cygnet-network
+    restart: unless-stopped
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cygnet-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@cygnet.energy
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - cygnet-network
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+    driver: local
+
+networks:
+  cygnet-network:
+    driver: bridge

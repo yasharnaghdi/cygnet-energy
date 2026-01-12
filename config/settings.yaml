@@ -1,0 +1,28 @@
+entso_e:
+  api_url: "https://web-api.tp.entsoe.eu/api"
+  timeout_seconds: 30
+  rate_limit_requests_per_second: 10
+  max_retries: 5
+  retry_backoff_base: 2
+  retry_backoff_ceiling: 60
+
+database:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "postgres"
+  name: "cygnet_grid"
+  pool_size: 20
+  max_overflow: 10
+
+collection:
+  interval_minutes: 15
+  offset_generation_seconds: 0
+  offset_load_seconds: 300
+  offset_flows_seconds: 600
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  rate_limit_per_minute: 100
