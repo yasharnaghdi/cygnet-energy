@@ -484,37 +484,6 @@ poetry run pytest tests/integration/
 - pytest-asyncio for async API tests
 - pytest-cov for coverage metrics
 
-***
-
-##  Roadmap
-
-### Phase 1 (Current)
-- PostgreSQL + ENTSO-E API integration
-- Carbon intensity calculation service
-- Streamlit dashboard MVP
-- Multi-country live data support
-- Multi-country comparison UI
-
-### Phase 2 (Q1 2026)
-- FastAPI REST endpoints for carbon service
-- Scheduled ETL jobs for all 7 countries
-- Historical data backfill (90 days)
-- Machine learning-based 24h forecast (scikit-learn)
-- Alert system (email/webhook for low-carbon windows)
-
-### Phase 3 (Q2 2026)
-- Time-series forecasting with Prophet/LSTM
-- Peak/off-peak tariff integration
-- Interactive European heatmap
-- PDF/CSV export for sustainability reporting
-- Multi-tenancy + API key authentication
-
-### Phase 4 (Future)
-- Kubernetes deployment manifests
-- Grafana dashboards for ops monitoring
-- GraphQL API layer
-- Mobile app (React Native)
-- Blockchain-verified carbon credits integration
 
 ***
 
