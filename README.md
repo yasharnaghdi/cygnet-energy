@@ -192,8 +192,6 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
   - Historical database-backed analytics (for DE)
   - Live API-backed analytics (for other countries)
 
-
-
 ***
 
 ## 2. Tech Stack
@@ -588,15 +586,6 @@ You should be able to:
 
 ***
 
-## Documentation
-
-- [Technical Architecture](docs/ARCHITECTURE.md) - Detailed design document
-- [API Reference](docs/API.md) - Endpoint specifications
-- [Database Schema](docs/SCHEMA.md) - SQL table definitions
-- [Operations Runbook](docs/OPERATIONS.md) - Daily operations procedures
-- [Contributing Guide](CONTRIBUTING.md) - Development workflow
-
-
 ## Contact & Support
 
 - **Author:** Yashar Naghdi
@@ -610,8 +599,6 @@ You should be able to:
 - ENTSO-E Transparency Platform for real-time grid data
 - TimescaleDB for time-series database optimization
 - FastAPI community for web framework
-
----
 
 **Last Updated:** January 2025
 **Version:** 0.1.0 (MVP)
