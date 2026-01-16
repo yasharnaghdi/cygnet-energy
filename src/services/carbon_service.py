@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 from src.api.client import EntsoEAPIClient
 from src.api.parser import EntsoEXMLParser
+from src.utils.zones import get_zone_keys
 import psycopg2
 from psycopg2 import sql
 import logging
@@ -136,14 +137,19 @@ class CarbonIntensityService:
 
         try:
             cursor = self.conn.cursor()
+            zone_keys = get_zone_keys(country)
 
             cursor.execute("""
                 SELECT time, psr_type, actual_generation_mw
                 FROM generation_actual
-                WHERE bidding_zone_mrid = %s
-                AND time = (SELECT MAX(time) FROM generation_actual WHERE bidding_zone_mrid = %s)
+                WHERE bidding_zone_mrid = ANY(%s)
+                AND time = (
+                    SELECT MAX(time)
+                    FROM generation_actual
+                    WHERE bidding_zone_mrid = ANY(%s)
+                )
                 ORDER BY time DESC, psr_type
-            """, (country, country))
+            """, (zone_keys, zone_keys))
 
             rows = cursor.fetchall()
             cursor.close()
@@ -194,6 +200,7 @@ class CarbonIntensityService:
         """
         try:
             cursor = self.conn.cursor()
+            zone_keys = get_zone_keys(country)
 
             # Get average generation by hour of day for past 30 days
             cursor.execute("""
@@ -202,12 +209,12 @@ class CarbonIntensityService:
                     psr_type,
                     AVG(actual_generation_mw) as avg_generation
                 FROM generation_actual
-                WHERE bidding_zone_mrid LIKE %s
+                WHERE bidding_zone_mrid = ANY(%s)
                 AND time >= NOW() - INTERVAL '30 days'
                 AND time < NOW()
                 GROUP BY hour_of_day, psr_type
                 ORDER BY hour_of_day, psr_type
-            """, (f'%{country}%',))
+            """, (zone_keys,))
 
             rows = cursor.fetchall()
             cursor.close()

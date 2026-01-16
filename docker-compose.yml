@@ -7,7 +7,7 @@ services:
     container_name: cygnet-postgres
     environment:
       POSTGRES_USER: cygnet
-      POSTGRES_PASSWORD: cygnet_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production}
       POSTGRES_DB: energy_db
     volumes:
       - postgres-data:/var/lib/postgresql/data

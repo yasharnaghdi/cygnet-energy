@@ -6,6 +6,7 @@ venv/
 *.egg-info/
 .env
 .env.local
+!.env.example
 config/secrets.yaml
 logs/
 *.log
@@ -16,3 +17,9 @@ logs/
 data/samples/
 .env*.local
 secrets.toml
+
+
+
+# IDE
+.vscode/
+.idea/
