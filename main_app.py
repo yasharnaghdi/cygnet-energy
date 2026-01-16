@@ -182,6 +182,10 @@ def fetch_generation_data(conn, country, start_dt, end_dt):
     conn.commit()
     return len(records)
 
+def set_global_range(start_date, end_date):
+    st.session_state["global_start"] = start_date
+    st.session_state["global_end"] = end_date
+
 
 # ══════════════════════════════════════════════════════════════
 # GLOBAL SIDEBAR (Control Center)
@@ -222,9 +226,20 @@ if "global_start" not in st.session_state:
 if "global_end" not in st.session_state:
     st.session_state["global_end"] = default_end
 
+def on_live_range_toggle():
+    if st.session_state.get("live_range"):
+        today = datetime.now().date()
+        st.session_state["global_start"] = today - timedelta(days=30)
+        st.session_state["global_end"] = today
+    elif min_date and max_date:
+        st.session_state["global_end"] = max_date
+        st.session_state["global_start"] = max(min_date, max_date - timedelta(days=30))
+
 live_range = st.sidebar.checkbox(
     "Enable live range (fetch on demand)",
     value=False,
+    key="live_range",
+    on_change=on_live_range_toggle,
     help="Allow any date range; data will be fetched from ENTSO-E when needed."
 )
 
@@ -246,26 +261,28 @@ if st.session_state["global_end"] > max_bound:
 if st.session_state["global_start"] > st.session_state["global_end"]:
     st.session_state["global_start"] = min_bound
 
-if min_date and max_date and not live_range:
-    st.sidebar.caption(f"Available data: {min_date} → {max_date}")
+if min_date and max_date:
+    st.sidebar.caption(f"DB coverage: {min_date} → {max_date}")
 
     recent_start = max(min_date, max_date - timedelta(days=30))
     previous_end = recent_start - timedelta(days=1)
     previous_start = max(min_date, previous_end - timedelta(days=30))
 
-    col_recent, col_prev = st.sidebar.columns(2)
-    with col_recent:
-        if st.button("Recent 30d", use_container_width=True):
-            st.session_state["global_start"] = recent_start
-            st.session_state["global_end"] = max_date
-            st.rerun()
-    with col_prev:
-        if st.button("Prior 30d", use_container_width=True):
-            st.session_state["global_start"] = previous_start
-            st.session_state["global_end"] = previous_end
-            st.rerun()
-elif live_range:
+    if not live_range:
+        col_recent, col_prev = st.sidebar.columns(2)
+        with col_recent:
+            if st.button("Recent 30d", use_container_width=True):
+                st.session_state["global_start"] = recent_start
+                st.session_state["global_end"] = max_date
+                st.rerun()
+        with col_prev:
+            if st.button("Prior 30d", use_container_width=True):
+                st.session_state["global_start"] = previous_start
+                st.session_state["global_end"] = previous_end
+                st.rerun()
+if live_range:
     st.sidebar.caption("Live range enabled: dates can exceed current DB coverage.")
+st.sidebar.caption(f"Date bounds: {min_bound} → {max_bound}")
 
 global_start = st.sidebar.date_input(
     "Start Date",
@@ -373,17 +390,19 @@ This platform demonstrates:
         with col_a:
             st.markdown("**Recent window (suggested)**")
             st.write(f"{recent_start} → {max_date}")
-            if st.button("Use recent window"):
-                st.session_state["global_start"] = recent_start
-                st.session_state["global_end"] = max_date
-                st.rerun()
+            st.button(
+                "Use recent window",
+                on_click=set_global_range,
+                args=(recent_start, max_date)
+            )
         with col_b:
             st.markdown("**Past window (suggested)**")
             st.write(f"{previous_start} → {previous_end}")
-            if st.button("Use past window"):
-                st.session_state["global_start"] = previous_start
-                st.session_state["global_end"] = previous_end
-                st.rerun()
+            st.button(
+                "Use past window",
+                on_click=set_global_range,
+                args=(previous_start, previous_end)
+            )
 
         st.caption(
             "Suggested flow: run Generation Analytics on the past window, then on the "
@@ -839,7 +858,7 @@ def render_generation_analytics(country, start_date, end_date):
         st.error(f"No data found for {country} between {start_date} and {end_date}")
         st.info("You can fetch the selected period directly from ENTSO-E.")
 
-        if st.button("Fetch from ENTSO-E API for this period"):
+        if st.button("Fetch from ENTSO-E API for this period", key="fetch_gen_analytics"):
             with st.spinner("Fetching live data and storing in the database..."):
                 inserted = fetch_generation_data(conn, country, start_dt, end_dt)
             if inserted > 0:
@@ -1197,8 +1216,8 @@ direction and magnitude, not absolute price, as the insight.
 
     st.markdown("### Predictive Response Curve")
     st.markdown(
-        "Forecast the direction and magnitude of price response for the current regime "
-        "across a range of shocks."
+        "Quantify the price impact of shocks and compare sensitivity across regimes. "
+        "Use this to evaluate which levers move price most."
     )
 
     if current_regime_id is None:
@@ -1218,6 +1237,8 @@ direction and magnitude, not absolute price, as the insight.
             step=1.0
         )
         curve_points = st.slider("Resolution", 6, 24, 12)
+        compare_regimes = st.checkbox("Compare all regimes", value=True)
+
         curve_df = tester.sensitivity_curve(
             current_regime_id,
             base_state,
@@ -1225,15 +1246,62 @@ direction and magnitude, not absolute price, as the insight.
             curve_range,
             n_points=curve_points
         )
-        fig_curve = px.line(
-            curve_df,
-            x="feature_value",
-            y="predicted_output",
-            title=f"Predicted price response in Regime {current_regime_id}",
-            labels={"feature_value": curve_feature, "predicted_output": "Predicted price"}
-        )
-        fig_curve.update_layout(height=300)
+
+        if compare_regimes:
+            all_curves = []
+            for rid in sorted(ensemble.models.keys()):
+                df = tester.sensitivity_curve(
+                    rid,
+                    base_state,
+                    curve_feature,
+                    curve_range,
+                    n_points=curve_points
+                )
+                df["regime_id"] = rid
+                all_curves.append(df)
+            combined = pd.concat(all_curves, ignore_index=True)
+            fig_curve = px.line(
+                combined,
+                x="feature_value",
+                y="predicted_output",
+                color="regime_id",
+                title="Predicted price response by regime",
+                labels={"feature_value": curve_feature, "predicted_output": "Predicted price"}
+            )
+        else:
+            fig_curve = px.line(
+                curve_df,
+                x="feature_value",
+                y="predicted_output",
+                title=f"Predicted price response in Regime {current_regime_id}",
+                labels={"feature_value": curve_feature, "predicted_output": "Predicted price"}
+            )
+
+        fig_curve.update_layout(height=320)
         st.plotly_chart(fig_curve, use_container_width=True)
+
+        step_map = {
+            "res_penetration": 1.0,
+            "net_import": 50.0,
+            "price_volatility": 1.0,
+        }
+        delta_step = step_map.get(curve_feature, 1.0)
+        impact = tester.stress_single_feature(
+            current_regime_id,
+            base_state,
+            curve_feature,
+            delta_step
+        )
+        baseline = impact["baseline_pred"]
+        per_unit = impact["delta_pred"]
+        pct_change = impact["pct_change"]
+
+        st.markdown("**Impact summary (current regime)**")
+        st.write(
+            f"Baseline: {baseline:.2f} | "
+            f"Δ per {delta_step:g} {curve_feature}: {per_unit:+.2f} "
+            f"({pct_change:+.2f}%)"
+        )
 
     st.divider()
 
@@ -1281,7 +1349,7 @@ def render_data_explorer(country, start_date, end_date):
         end_dt = datetime.combine(end_date, datetime.max.time())
         zone_keys = get_zone_keys(country)
 
-        # Count query
+        # Count total records
         cursor.execute(
             """
             SELECT COUNT(*)
@@ -1290,13 +1358,26 @@ def render_data_explorer(country, start_date, end_date):
             """,
             (zone_keys,)
         )
-        count = cursor.fetchone()[0]
+        total_count = cursor.fetchone()[0]
+
+        # Count records in selected range
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM generation_actual
+            WHERE bidding_zone_mrid = ANY(%s)
+              AND time >= %s
+              AND time <= %s
+            """,
+            (zone_keys, start_dt, end_dt)
+        )
+        range_count = cursor.fetchone()[0]
 
         # Display metrics
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric("Total Records", f"{count:,}")
+            st.metric("Total Records", f"{total_count:,}")
 
         with col2:
             st.metric("Country", country)
@@ -1305,6 +1386,7 @@ def render_data_explorer(country, start_date, end_date):
             st.metric("Date Range", f"{(end_date - start_date).days} days")
 
         st.divider()
+        st.caption(f"Selected range: {start_date} → {end_date}")
 
         coverage = get_data_coverage(conn, country)
         if coverage.get("min_date") and coverage.get("max_date"):
@@ -1318,8 +1400,8 @@ def render_data_explorer(country, start_date, end_date):
                 "Data coverage is currently strongest for DE."
             )
 
-        if count == 0:
-            if st.button("Fetch from ENTSO-E API for this period"):
+        if range_count == 0:
+            if st.button("Fetch from ENTSO-E API for this period", key="fetch_data_explorer"):
                 with st.spinner("Fetching live data and storing in the database..."):
                     inserted = fetch_generation_data(conn, country, start_dt, end_dt)
                 if inserted > 0:
@@ -1331,35 +1413,38 @@ def render_data_explorer(country, start_date, end_date):
         # Sample data
         st.markdown("### Sample Data")
 
-        cursor.execute(
-            """
-            SELECT time, psr_type, actual_generation_mw
-            FROM generation_actual
-            WHERE bidding_zone_mrid = ANY(%s)
-              AND time >= %s
-              AND time <= %s
-            ORDER BY time DESC
-            LIMIT 100;
-            """,
-            (zone_keys, start_dt, end_dt)
-        )
-        rows = cursor.fetchall()
-
-        if rows:
-            df = pd.DataFrame(rows, columns=['Timestamp', 'Source Type', 'Generation (MW)'])
-            st.dataframe(df, use_container_width=True, height=400)
-
-            # Download button
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "Download CSV",
-                csv,
-                f"generation_data_{country}_{start_date}.csv",
-                "text/csv",
+        if range_count > 0:
+            cursor.execute(
+                """
+                SELECT time, psr_type, actual_generation_mw
+                FROM generation_actual
+                WHERE bidding_zone_mrid = ANY(%s)
+                  AND time >= %s
+                  AND time <= %s
+                ORDER BY time DESC
+                LIMIT 100;
+                """,
+                (zone_keys, start_dt, end_dt)
             )
+            rows = cursor.fetchall()
+
+            if rows:
+                df = pd.DataFrame(rows, columns=['Timestamp', 'Source Type', 'Generation (MW)'])
+                st.dataframe(df, use_container_width=True, height=400)
+
+                # Download button
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "Download CSV",
+                    csv,
+                    f"generation_data_{country}_{start_date}.csv",
+                    "text/csv",
+                )
+            else:
+                st.warning(f"No data found for {country} in selected date range")
         else:
             st.warning(f"No data found for {country} in selected date range")
-            st.caption("Try the preset date buttons in the sidebar if data exists.")
+            st.caption("Use live range and fetch data for the selected window.")
 
         cursor.close()
 
