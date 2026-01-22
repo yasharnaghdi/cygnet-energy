@@ -5,6 +5,8 @@ with a unified Global Sidebar navigation.
 """
 
 import sys
+import os
+import math
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -31,6 +33,42 @@ try:
     REGIME_FEATURES_AVAILABLE = True
 except Exception:
     REGIME_FEATURES_AVAILABLE = False
+
+PSR_LABELS = {
+    "B01": "Biomass",
+    "B02": "Brown Coal/Lignite",
+    "B03": "Coal-Derived Gas",
+    "B04": "Fossil Gas",
+    "B05": "Hard Coal",
+    "B06": "Fossil Oil",
+    "B07": "Oil Shale",
+    "B08": "Peat",
+    "B09": "Geothermal",
+    "B10": "Hydro Pumped Storage",
+    "B11": "Hydro Run-of-River",
+    "B12": "Hydro Reservoir",
+    "B13": "Marine",
+    "B14": "Nuclear",
+    "B15": "Other",
+    "B16": "Other Renewable",
+    "B17": "Solar",
+    "B18": "Solar PV",
+    "B19": "Wind Onshore",
+    "B20": "Wind Offshore",
+    "B21": "Waste",
+}
+
+REGIME_FEATURE_LABELS = {
+    "res_penetration": "RES penetration (%)",
+    "net_import": "Net import (MW)",
+    "price_volatility": "Price volatility",
+}
+
+REGIME_FEATURE_DETAILS = {
+    "res_penetration": "Share of demand met by renewables. Higher values usually lower carbon intensity.",
+    "net_import": "Net imports into the zone. Higher values can signal tighter local supply.",
+    "price_volatility": "Price variability over recent hours. Higher values indicate instability or stress.",
+}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -190,6 +228,152 @@ def set_global_range(start_date, end_date):
     st.session_state["global_start"] = start_date
     st.session_state["global_end"] = end_date
 
+def intensity_status(intensity):
+    if intensity < 150:
+        return "LOW"
+    if intensity < 300:
+        return "MODERATE"
+    if intensity < 500:
+        return "HIGH"
+    return "CRITICAL"
+
+def build_demo_mix(intensity, renewable_pct):
+    renewable_share = min(75.0, max(20.0, renewable_pct))
+    nuclear_share = 15.0 if renewable_share < 60 else 10.0
+    fossil_share = max(5.0, 100.0 - renewable_share - nuclear_share)
+    if renewable_share + nuclear_share + fossil_share != 100.0:
+        renewable_share = 100.0 - nuclear_share - fossil_share
+
+    mix = [
+        ("Solar", renewable_share * 0.35),
+        ("Wind Onshore", renewable_share * 0.4),
+        ("Wind Offshore", renewable_share * 0.25),
+        ("Nuclear", nuclear_share),
+        ("Fossil Gas", fossil_share * 0.7),
+        ("Hard Coal", fossil_share * 0.3),
+    ]
+
+    formatted = {}
+    for name, pct in mix:
+        pct = round(pct, 1)
+        emissions = round((pct / 100.0) * intensity * 10, 0)
+        formatted[name] = {"mw": None, "pct": pct, "emissions": emissions}
+    return formatted
+
+def build_demo_current_data(country):
+    base_intensity = {
+        "DE": 260,
+        "FR": 120,
+        "GB": 220,
+        "ES": 180,
+        "IT": 240,
+    }.get(country, 210)
+    renewable_pct = max(20.0, min(75.0, 70.0 - (base_intensity - 100) * 0.2))
+    return {
+        "timestamp": datetime.now().replace(minute=0, second=0, microsecond=0),
+        "country": country,
+        "co2_intensity": round(base_intensity, 2),
+        "generation_mix": build_demo_mix(base_intensity, renewable_pct),
+        "renewable_pct": round(renewable_pct, 1),
+        "fossil_pct": round(100 - renewable_pct, 1),
+        "status": intensity_status(base_intensity),
+        "total_generation_mw": round(45000 + base_intensity * 10, 2),
+        "data_source": "Demo",
+    }
+
+def build_demo_green_data(forecast_df, threshold=200):
+    if forecast_df is None or forecast_df.empty:
+        return None
+    df = forecast_df.copy()
+    df["co2_intensity"] = pd.to_numeric(df["co2_intensity"], errors="coerce")
+    df = df.dropna(subset=["co2_intensity"])
+    if df.empty:
+        return None
+    green = df[df["co2_intensity"] <= threshold]
+    worst = df.nlargest(3, "co2_intensity")
+    best = df.loc[df["co2_intensity"].idxmin()]
+    avg_intensity = df["co2_intensity"].mean()
+    green_intensity = green["co2_intensity"].mean() if not green.empty else avg_intensity
+    co2_reduction_pct = ((avg_intensity - green_intensity) / avg_intensity * 100) if avg_intensity else 0
+    return {
+        "green_hours": green[["timestamp", "co2_intensity", "renewable_pct"]].to_dict("records"),
+        "best_hour": {
+            "timestamp": best["timestamp"],
+            "co2_intensity": best["co2_intensity"],
+            "renewable_pct": best["renewable_pct"],
+        },
+        "worst_hours": worst[["timestamp", "co2_intensity", "renewable_pct"]].to_dict("records"),
+        "average_intensity": round(avg_intensity, 2),
+        "savings_potential": {
+            "co2_reduction_pct": round(co2_reduction_pct, 1),
+            "cost_reduction_pct": round(co2_reduction_pct * 0.8, 1),
+        },
+    }
+
+def build_demo_carbon_snapshot(country, hours=24):
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    base = build_demo_current_data(country)
+    rows = []
+    for i in range(hours):
+        tstamp = now + timedelta(hours=i)
+        phase = 2 * math.pi * i / 24
+        intensity = base["co2_intensity"] + 60 * math.sin(phase) + 15 * math.sin(phase * 3)
+        intensity = max(80.0, intensity)
+        renewable_pct = max(15.0, min(80.0, 70.0 - (intensity - 100) * 0.18))
+        rows.append({
+            "timestamp": tstamp,
+            "co2_intensity": round(intensity, 2),
+            "renewable_pct": round(renewable_pct, 1),
+            "status": intensity_status(intensity),
+        })
+    forecast_df = pd.DataFrame(rows)
+    current = base.copy()
+    current.update({
+        "co2_intensity": forecast_df["co2_intensity"].iloc[0],
+        "renewable_pct": forecast_df["renewable_pct"].iloc[0],
+        "fossil_pct": round(100 - forecast_df["renewable_pct"].iloc[0], 1),
+        "status": forecast_df["status"].iloc[0],
+        "generation_mix": build_demo_mix(forecast_df["co2_intensity"].iloc[0],
+                                         forecast_df["renewable_pct"].iloc[0]),
+        "data_source": "Demo",
+    })
+    green_data = build_demo_green_data(forecast_df)
+    return current, forecast_df, green_data
+
+def build_demo_generation_data(start_dt, end_dt):
+    if end_dt <= start_dt:
+        end_dt = start_dt + timedelta(days=1)
+    horizon_days = min(14, max(1, (end_dt - start_dt).days))
+    start = end_dt - timedelta(days=horizon_days)
+    times = pd.date_range(start=start, end=end_dt, freq="H")
+    rows = []
+    for ts in times:
+        hour = ts.hour
+        solar = max(0.0, math.sin((hour - 6) / 12 * math.pi)) * 8000
+        wind_on = 5000 + 1500 * math.sin(2 * math.pi * hour / 24 + 0.7)
+        wind_off = 3500 + 1200 * math.sin(2 * math.pi * hour / 24 + 1.4)
+        gas = 10000 + 2000 * math.cos(2 * math.pi * hour / 24)
+        nuclear = 8000
+        rows.extend([
+            {"time": ts.to_pydatetime(), "psr_type": "B18", "actual_generation_mw": solar},
+            {"time": ts.to_pydatetime(), "psr_type": "B19", "actual_generation_mw": wind_on},
+            {"time": ts.to_pydatetime(), "psr_type": "B20", "actual_generation_mw": wind_off},
+            {"time": ts.to_pydatetime(), "psr_type": "B04", "actual_generation_mw": gas},
+            {"time": ts.to_pydatetime(), "psr_type": "B14", "actual_generation_mw": nuclear},
+        ])
+    return pd.DataFrame(rows)
+
+def compute_renewable_stats_from_df(df):
+    renewable_types = {"B01", "B17", "B18", "B19", "B20"}
+    total_gen = df["actual_generation_mw"].sum()
+    renewable_gen = df[df["psr_type"].isin(renewable_types)]["actual_generation_mw"].sum()
+    fossil_gen = total_gen - renewable_gen
+    return {
+        "total_gen": total_gen,
+        "renewable_gen": renewable_gen,
+        "fossil_gen": fossil_gen,
+    }
+
 
 # ══════════════════════════════════════════════════════════════
 # GLOBAL SIDEBAR (Control Center)
@@ -265,6 +449,40 @@ if st.session_state["global_end"] > max_bound:
 if st.session_state["global_start"] > st.session_state["global_end"]:
     st.session_state["global_start"] = min_bound
 
+def resolve_range_preset(preset):
+    if preset == "Custom":
+        return None, None
+    today = datetime.now().date()
+    base_end = today if live_range else (max_date or today)
+    if preset == "Last 7 days":
+        start = base_end - timedelta(days=7)
+        end = base_end
+    elif preset == "Last 30 days":
+        start = base_end - timedelta(days=30)
+        end = base_end
+    elif preset == "Last 90 days":
+        start = base_end - timedelta(days=90)
+        end = base_end
+    elif preset == "Most recent 30 days (DB)" and max_date:
+        start = max(min_date or max_date, max_date - timedelta(days=30))
+        end = max_date
+    elif preset == "Prior 30 days (DB)" and max_date:
+        recent_start = max(min_date or max_date, max_date - timedelta(days=30))
+        end = recent_start - timedelta(days=1)
+        start = max(min_date or end, end - timedelta(days=30))
+    else:
+        return None, None
+    start = max(min_bound, start)
+    end = min(max_bound, end)
+    return start, end
+
+def on_range_preset_change():
+    preset = st.session_state.get("range_preset", "Custom")
+    start, end = resolve_range_preset(preset)
+    if start and end:
+        st.session_state["global_start"] = start
+        st.session_state["global_end"] = end
+
 if min_date and max_date:
     st.sidebar.caption(f"DB coverage: {min_date} → {max_date}")
 
@@ -287,6 +505,22 @@ if min_date and max_date:
 if live_range:
     st.sidebar.caption("Live range enabled: dates can exceed current DB coverage.")
 st.sidebar.caption(f"Date bounds: {min_bound} → {max_bound}")
+
+st.sidebar.subheader("Quick Range")
+range_options = [
+    "Custom",
+    "Last 7 days",
+    "Last 30 days",
+    "Last 90 days",
+    "Most recent 30 days (DB)",
+    "Prior 30 days (DB)",
+]
+st.sidebar.selectbox(
+    "Preset",
+    range_options,
+    key="range_preset",
+    on_change=on_range_preset_change,
+)
 
 global_start = st.sidebar.date_input(
     "Start Date",
@@ -461,8 +695,12 @@ def render_carbon_intelligence(default_country):
         country_data = {}
         for country in selected_countries:
             data = service.get_current_intensity(country)
-            if data:
-                country_data[country] = data
+            if not data:
+                data = build_demo_current_data(country)
+            country_data[country] = data
+
+        if any(d.get("data_source") == "Demo" for d in country_data.values()):
+            st.info("Live data unavailable for some zones; showing demo data.")
 
         if not country_data:
             st.error("No data available for selected countries")
@@ -565,7 +803,14 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
         # Live Grid Status
         st.markdown("## Live Grid Status")
 
+        demo_mode = False
+        forecast_df = None
+        green_data = None
         current_data = service.get_current_intensity(country)
+        if not current_data:
+            demo_mode = True
+            st.info("Live data unavailable; showing demo data.")
+            current_data, forecast_df, green_data = build_demo_carbon_snapshot(country)
 
         if current_data:
             col1, col2, col3, col4 = st.columns(4)
@@ -647,7 +892,12 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
             # 24-Hour Carbon Forecast
             st.markdown("### 24-Hour Carbon Forecast")
 
-            forecast_df = service.get_24h_forecast(country, hours=24)
+            if not demo_mode:
+                forecast_df = service.get_24h_forecast(country, hours=24)
+
+            if forecast_df is None or forecast_df.empty:
+                st.info("Forecast unavailable; showing demo forecast.")
+                _, forecast_df, _ = build_demo_carbon_snapshot(country)
 
             if forecast_df is not None and not forecast_df.empty:
                 fig_forecast = go.Figure()
@@ -691,7 +941,10 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
             st.divider()
 
             # Green Hours
-            green_data = service.get_green_hours(country, threshold=200)
+            if green_data is None and not demo_mode:
+                green_data = service.get_green_hours(country, threshold=200)
+            if green_data is None:
+                green_data = build_demo_green_data(forecast_df)
 
             if green_data and green_data['green_hours']:
                 st.markdown("### Green Hours - When to Use Electricity")
@@ -848,9 +1101,9 @@ def render_generation_analytics(country, start_date, end_date):
         cur.execute(
             """
             SELECT
-                SUM(CASE WHEN psr_type IN ('B01', 'B18', 'B19', 'B20')
+                SUM(CASE WHEN psr_type IN ('B01', 'B17', 'B18', 'B19', 'B20')
                     THEN actual_generation_mw ELSE 0 END) as renewable_gen,
-                SUM(CASE WHEN psr_type NOT IN ('B01', 'B18', 'B19', 'B20')
+                SUM(CASE WHEN psr_type NOT IN ('B01', 'B17', 'B18', 'B19', 'B20')
                     THEN actual_generation_mw ELSE 0 END) as fossil_gen,
                 SUM(actual_generation_mw) as total_gen
             FROM generation_actual
@@ -867,20 +1120,33 @@ def render_generation_analytics(country, start_date, end_date):
 
     df = load_generation_data(conn, country, start_dt, end_dt)
     renewable_stats = load_renewable_fraction(conn, country, start_dt, end_dt)
+    demo_mode = False
 
     if df.empty:
         st.error(f"No data found for {country} between {start_date} and {end_date}")
         st.info("You can fetch the selected period directly from ENTSO-E.")
 
-        if st.button("Fetch from ENTSO-E API for this period", key="fetch_gen_analytics"):
-            with st.spinner("Fetching live data and storing in the database..."):
-                inserted = fetch_generation_data(conn, country, start_dt, end_dt)
-            if inserted > 0:
-                st.success(f"Inserted {inserted:,} rows. Reloading view...")
-                st.rerun()
-            else:
-                st.warning("No data returned for this range. Try a shorter window.")
-        return
+        col_fetch, col_demo = st.columns(2)
+        with col_fetch:
+            if st.button("Fetch from ENTSO-E API for this period", key="fetch_gen_analytics"):
+                with st.spinner("Fetching live data and storing in the database..."):
+                    inserted = fetch_generation_data(conn, country, start_dt, end_dt)
+                if inserted > 0:
+                    st.success(f"Inserted {inserted:,} rows. Reloading view...")
+                    st.rerun()
+                else:
+                    st.warning("No data returned for this range. Try a shorter window.")
+        with col_demo:
+            if st.button("Show demo sample data", key="demo_gen_analytics"):
+                st.session_state["demo_gen_analytics"] = True
+
+        if not st.session_state.get("demo_gen_analytics"):
+            return
+
+        demo_mode = True
+        df = build_demo_generation_data(start_dt, end_dt)
+        renewable_stats = compute_renewable_stats_from_df(df)
+        st.caption("Demo data in use for this view.")
 
     # Metrics row
     col1, col2, col3, col4 = st.columns(4)
@@ -925,7 +1191,8 @@ def render_generation_analytics(country, start_date, end_date):
 
         # PSR type colors
         colors = {
-            'B18': '#FDB462',  # Solar
+            'B17': '#FDE68A',  # Solar
+            'B18': '#FDB462',  # Solar PV
             'B19': '#80B1D3',  # Wind onshore
             'B20': '#8DD3C7',  # Wind offshore
             'B01': '#BEBADA',  # Biomass
@@ -934,23 +1201,13 @@ def render_generation_analytics(country, start_date, end_date):
             'B14': '#FFD92F',  # Nuclear
         }
 
-        psr_names = {
-            'B18': 'Solar',
-            'B19': 'Wind Onshore',
-            'B20': 'Wind Offshore',
-            'B01': 'Biomass',
-            'B04': 'Fossil Gas',
-            'B05': 'Hard Coal',
-            'B14': 'Nuclear',
-        }
-
         for col in df_pivot.columns:
             if col != 'time':
                 fig_timeseries.add_trace(go.Scatter(
                     x=df_pivot['time'],
                     y=df_pivot[col],
                     mode='lines',
-                    name=psr_names.get(col, col),
+                    name=PSR_LABELS.get(col, col),
                     line=dict(color=colors.get(col, '#cccccc'), width=2),
                     stackgroup='one'
                 ))
@@ -964,6 +1221,7 @@ def render_generation_analytics(country, start_date, end_date):
         )
 
         st.plotly_chart(fig_timeseries, use_container_width=True)
+        st.caption("Legend labels are ENTSO-E generation types mapped to plain names.")
 
     # RIGHT: Renewable pie chart
     with right_col:
@@ -999,28 +1257,31 @@ def render_generation_analytics(country, start_date, end_date):
     hourly_avg = df.groupby(['hour', 'psr_type'])['actual_generation_mw'].mean().reset_index()
 
     # Filter for renewables only
-    renewable_types = ['B18', 'B19', 'B20', 'B01']
-    df_renewable_hourly = hourly_avg[hourly_avg['psr_type'].isin(renewable_types)]
+    renewable_types = ['B17', 'B18', 'B19', 'B20', 'B01']
+    df_renewable_hourly = hourly_avg[hourly_avg['psr_type'].isin(renewable_types)].copy()
+    df_renewable_hourly['psr_name'] = df_renewable_hourly['psr_type'].map(PSR_LABELS).fillna(df_renewable_hourly['psr_type'])
 
     fig_hourly = px.bar(
         df_renewable_hourly,
         x='hour',
         y='actual_generation_mw',
-        color='psr_type',
-        labels={'hour': 'Hour of Day', 'actual_generation_mw': 'Average Generation (MW)', 'psr_type': 'Type'},
+        color='psr_name',
+        labels={'hour': 'Hour of Day', 'actual_generation_mw': 'Average Generation (MW)', 'psr_name': 'Type'},
         color_discrete_map={
-            'B18': '#FDB462',
-            'B19': '#80B1D3',
-            'B20': '#8DD3C7',
-            'B01': '#BEBADA'
+            'Solar': '#FDE68A',
+            'Solar PV': '#FDB462',
+            'Wind Onshore': '#80B1D3',
+            'Wind Offshore': '#8DD3C7',
+            'Biomass': '#BEBADA'
         },
-        category_orders={'psr_type': renewable_types}
+        category_orders={'psr_name': [PSR_LABELS.get(code, code) for code in renewable_types]}
     )
 
     fig_hourly.update_layout(height=300)
     st.plotly_chart(fig_hourly, use_container_width=True)
 
-    st.caption(f"Data Source: ENTSO-E | Zone: {country} | Rows: {len(df):,}")
+    source_label = "Demo (synthetic)" if demo_mode else "ENTSO-E"
+    st.caption(f"Data Source: {source_label} | Zone: {country} | Rows: {len(df):,}")
 
 
 def render_regimes_and_stress(country):
@@ -1030,6 +1291,25 @@ def render_regimes_and_stress(country):
 
     if not REGIME_FEATURES_AVAILABLE:
         st.warning("ML modules not available. Check src/models/trained/ directory.")
+        if st.button("Show demo regime snapshot", key="demo_regime_missing"):
+            st.subheader("Current Operating Regime (Demo)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Regime", "Stressed")
+            c2.metric("Confidence", "0.72")
+            c3.metric("RES Penetration", "28.4%")
+            c4.metric("Net Import", "1,450 MW")
+            st.markdown("### Driver Snapshot (Demo)")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"driver": "Net import constraint", "impact": "High"},
+                        {"driver": "RES drop", "impact": "Medium"},
+                        {"driver": "Load surge", "impact": "Medium"},
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
         return
 
     detector, ensemble, tester = load_regime_stack()
@@ -1062,6 +1342,27 @@ direction and magnitude, not absolute price, as the insight.
         "under `src/models/trained`."
     )
 
+    st.subheader("How to interpret this page")
+    st.write(
+        "Regimes describe operating conditions, not price forecasts. Use the driver "
+        "signals to understand why the regime is assigned, then test sensitivity "
+        "using the what-if tools."
+    )
+    with st.expander("Feature definitions", expanded=False):
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Feature": REGIME_FEATURE_LABELS.get(key, key),
+                        "Meaning": REGIME_FEATURE_DETAILS.get(key, ""),
+                    }
+                    for key in REGIME_FEATURE_LABELS
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     try:
         conn = get_db()
     except Exception as exc:
@@ -1083,6 +1384,25 @@ direction and magnitude, not absolute price, as the insight.
 
     if latest.empty:
         st.info(f"No regime data available for {country}. Run the regime computation pipeline first.")
+        if st.button("Show demo regime snapshot", key="demo_regime_empty"):
+            st.subheader("Current Operating Regime (Demo)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Regime", "Balanced")
+            c2.metric("Confidence", "0.65")
+            c3.metric("RES Penetration", "41.2%")
+            c4.metric("Net Import", "620 MW")
+            st.markdown("### Driver Snapshot (Demo)")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"driver": "Wind rebound", "impact": "High"},
+                        {"driver": "Interconnect easing", "impact": "Medium"},
+                        {"driver": "Price volatility", "impact": "Low"},
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
         return
 
     row = latest.iloc[0]
@@ -1094,6 +1414,9 @@ direction and magnitude, not absolute price, as the insight.
     c2.metric("Confidence", f"{float(row.get('regime_confidence', 0.0)):.2f}")
     c3.metric("RES Penetration", f"{float(row.get('res_penetration', 0.0)):.1f}%")
     c4.metric("Net Import", f"{float(row.get('net_import', 0.0)):.0f} MW")
+    st.caption(
+        "RES penetration = share of demand met by renewables; net import = external supply balance."
+    )
 
     required_features = ensemble.feature_names or [
         "res_penetration",
@@ -1147,7 +1470,10 @@ direction and magnitude, not absolute price, as the insight.
 
     # What-if scenario
     st.markdown("### What-If Scenario Analysis")
-    st.markdown("Simulate how price reacts to shocks in different regimes")
+    st.markdown(
+        "Simulate how price reacts to shocks in different regimes. "
+        "Use the direction of change to guide decisions; absolute values are model-specific."
+    )
 
     feature_ranges = {
         "res_penetration": (-20.0, 20.0, 5.0),
@@ -1164,7 +1490,8 @@ direction and magnitude, not absolute price, as the insight.
     with col_input:
         feature = st.selectbox(
             "Shock Feature",
-            required_features
+            required_features,
+            format_func=lambda key: REGIME_FEATURE_LABELS.get(key, key)
         )
         min_val, max_val, default_val = feature_ranges.get(feature, (-50.0, 50.0, 10.0))
         delta = st.slider("Shock Size", min_val, max_val, default_val, step=1.0)
@@ -1204,9 +1531,10 @@ direction and magnitude, not absolute price, as the insight.
 
     scenario_features = [feat for feat in scenario.perturbations.keys() if feat not in base_state]
     if scenario_features:
+        friendly = [REGIME_FEATURE_LABELS.get(feat, feat) for feat in scenario_features]
         st.warning(
             "Scenario uses features not in the current model: "
-            + ", ".join(scenario_features)
+            + ", ".join(friendly)
         )
     elif st.button("Run Scenario Across Regimes"):
         scenario_results = tester.run_scenario(scenario, base_state)
@@ -1244,6 +1572,7 @@ direction and magnitude, not absolute price, as the insight.
         curve_feature = st.selectbox(
             "Feature to sweep",
             required_features,
+            format_func=lambda key: REGIME_FEATURE_LABELS.get(key, key),
             key="curve_feature"
         )
         curve_min, curve_max, _ = feature_ranges.get(curve_feature, (-50.0, 50.0, 10.0))
@@ -1284,7 +1613,10 @@ direction and magnitude, not absolute price, as the insight.
                 y="predicted_output",
                 color="regime_id",
                 title="Predicted price response by regime",
-                labels={"feature_value": curve_feature, "predicted_output": "Predicted price"}
+                labels={
+                    "feature_value": REGIME_FEATURE_LABELS.get(curve_feature, curve_feature),
+                    "predicted_output": "Predicted price",
+                }
             )
         else:
             fig_curve = px.line(
@@ -1292,7 +1624,10 @@ direction and magnitude, not absolute price, as the insight.
                 x="feature_value",
                 y="predicted_output",
                 title=f"Predicted price response in Regime {current_regime_id}",
-                labels={"feature_value": curve_feature, "predicted_output": "Predicted price"}
+                labels={
+                    "feature_value": REGIME_FEATURE_LABELS.get(curve_feature, curve_feature),
+                    "predicted_output": "Predicted price",
+                }
             )
 
         fig_curve.update_layout(height=320)
@@ -1317,7 +1652,7 @@ direction and magnitude, not absolute price, as the insight.
         st.markdown("**Impact summary (current regime)**")
         st.write(
             f"Baseline: {baseline:.2f} | "
-            f"Δ per {delta_step:g} {curve_feature}: {per_unit:+.2f} "
+            f"Δ per {delta_step:g} {REGIME_FEATURE_LABELS.get(curve_feature, curve_feature)}: {per_unit:+.2f} "
             f"({pct_change:+.2f}%)"
         )
 
@@ -1423,14 +1758,19 @@ def render_data_explorer(country, start_date, end_date):
             )
 
         if range_count == 0:
-            if st.button("Fetch from ENTSO-E API for this period", key="fetch_data_explorer"):
-                with st.spinner("Fetching live data and storing in the database..."):
-                    inserted = fetch_generation_data(conn, country, start_dt, end_dt)
-                if inserted > 0:
-                    st.success(f"Inserted {inserted:,} rows. Reloading view...")
-                    st.rerun()
-                else:
-                    st.warning("No data returned for this range. Try a shorter window.")
+            col_fetch, col_demo = st.columns(2)
+            with col_fetch:
+                if st.button("Fetch from ENTSO-E API for this period", key="fetch_data_explorer"):
+                    with st.spinner("Fetching live data and storing in the database..."):
+                        inserted = fetch_generation_data(conn, country, start_dt, end_dt)
+                    if inserted > 0:
+                        st.success(f"Inserted {inserted:,} rows. Reloading view...")
+                        st.rerun()
+                    else:
+                        st.warning("No data returned for this range. Try a shorter window.")
+            with col_demo:
+                if st.button("Show demo sample data", key="demo_data_explorer"):
+                    st.session_state["demo_data_explorer"] = True
 
         # Sample data
         st.markdown("### Sample Data")
@@ -1452,6 +1792,8 @@ def render_data_explorer(country, start_date, end_date):
 
             if rows:
                 df = pd.DataFrame(rows, columns=['Timestamp', 'Source Type', 'Generation (MW)'])
+                df['Source Name'] = df['Source Type'].map(PSR_LABELS).fillna(df['Source Type'])
+                df = df[['Timestamp', 'Source Type', 'Source Name', 'Generation (MW)']]
                 st.dataframe(df, use_container_width=True, height=400)
 
                 # Download button
@@ -1465,8 +1807,20 @@ def render_data_explorer(country, start_date, end_date):
             else:
                 st.warning(f"No data found for {country} in selected date range")
         else:
-            st.warning(f"No data found for {country} in selected date range")
-            st.caption("Use live range and fetch data for the selected window.")
+            if st.session_state.get("demo_data_explorer"):
+                demo_df = build_demo_generation_data(start_dt, end_dt).head(100)
+                demo_df = demo_df.rename(columns={
+                    "time": "Timestamp",
+                    "psr_type": "Source Type",
+                    "actual_generation_mw": "Generation (MW)",
+                })
+                demo_df["Source Name"] = demo_df["Source Type"].map(PSR_LABELS).fillna(demo_df["Source Type"])
+                demo_df = demo_df[['Timestamp', 'Source Type', 'Source Name', 'Generation (MW)']]
+                st.caption("Demo data in use for this table.")
+                st.dataframe(demo_df, use_container_width=True, height=400)
+            else:
+                st.warning(f"No data found for {country} in selected date range")
+                st.caption("Use live range and fetch data for the selected window.")
 
         cursor.close()
 
@@ -1587,33 +1941,83 @@ digraph {
 """)
 
 
+def render_health_setup(country, coverage):
+    st.markdown("# Health & Setup")
+    st.markdown("Preflight checks to keep the demo stable and easy to run.")
+
+    st.subheader("System Checks")
+    col1, col2, col3 = st.columns(3)
+
+    api_token = os.getenv("API_TOKEN")
+    with col1:
+        if api_token:
+            st.success("ENTSO-E API token detected")
+        else:
+            st.error("ENTSO-E API token missing")
+            st.caption("Add `API_TOKEN` to `.env` for live data fetches.")
+
+    with col2:
+        try:
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+            st.success("Database connection OK")
+        except Exception as exc:
+            st.error("Database connection failed")
+            st.caption(f"{exc}")
+
+    with col3:
+        if coverage and coverage.get("min_date") and coverage.get("max_date"):
+            st.success("Historical data available")
+            st.caption(
+                f"{country}: {coverage['min_date']} → {coverage['max_date']}"
+            )
+        else:
+            st.warning("No historical data found")
+            st.caption("Enable live range and fetch from ENTSO-E for a demo window.")
+
+    st.divider()
+
+    st.subheader("Demo Readiness")
+    steps = [
+        "Pick a zone with data coverage (DE recommended).",
+        "Use the suggested recent window in the sidebar.",
+        "Run Generation Analytics to confirm charts populate.",
+        "Open Grid Regimes & Stress Testing (requires trained models).",
+    ]
+    st.write("Suggested demo flow:")
+    st.write("\n".join([f"- {step}" for step in steps]))
+
+    if not REGIME_FEATURES_AVAILABLE:
+        st.info("Regime models not detected. Add files under `src/models/trained` for ML demos.")
+
+
 # ══════════════════════════════════════════════════════════════
 # MAIN NAVIGATION
 # ══════════════════════════════════════════════════════════════
 
-tabs = st.tabs([
+sections = [
     "Overview",
     "Carbon Intelligence",
     "Generation Analytics",
     "Grid Regimes & Stress Testing",
     "Data Explorer",
-    "Technical Info"
-])
+    "Technical Info",
+    "Health & Setup",
+]
+section = st.sidebar.radio("Navigate", sections, key="section")
 
-with tabs[0]:
+if section == "Overview":
     render_overview(global_country, coverage)
-
-with tabs[1]:
+elif section == "Carbon Intelligence":
     render_carbon_intelligence(global_country)
-
-with tabs[2]:
+elif section == "Generation Analytics":
     render_generation_analytics(global_country, global_start, global_end)
-
-with tabs[3]:
+elif section == "Grid Regimes & Stress Testing":
     render_regimes_and_stress(global_country)
-
-with tabs[4]:
+elif section == "Data Explorer":
     render_data_explorer(global_country, global_start, global_end)
-
-with tabs[5]:
+elif section == "Technical Info":
     render_technical_info()
+elif section == "Health & Setup":
+    render_health_setup(global_country, coverage)
