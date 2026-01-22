@@ -1,17 +1,18 @@
 import pytest
-from unittest.mock import patch
+from datetime import datetime, timedelta
+
 from src.api.client import EntsoEAPIClient
-from datetime import datetime
+from src.utils.config import API_TOKEN
 
 @pytest.fixture
 def api_client():
-    return EntsoEAPIClient(token="test_token_12345")
+    return EntsoEAPIClient(token=API_TOKEN)
 
 class TestEntsoEAPI:
 
     def test_api_initialization(self, api_client):
         """Test client initializes correctly"""
-        assert api_client.token == "test_token_12345"
+        assert api_client.token == API_TOKEN
         assert api_client.BASE_URL == "https://web-api.tp.entsoe.eu/api"
         assert "DE" in api_client.BIDDING_ZONES
 
@@ -21,21 +22,15 @@ class TestEntsoEAPI:
         assert api_client.BIDDING_ZONES["FR"] == "10YFR-RTE------C"
         assert api_client.BIDDING_ZONES["GB"] == "10YGB-NGET-----0"
 
-    @patch('requests.get')
-    def test_get_actual_generation_success(self, mock_get, api_client):
-        """Test successful generation data fetch"""
-        mock_response = mock_get.return_value
-        mock_response.status_code = 200
-        mock_response.text = "<Publication_MarketDocument>...</Publication_MarketDocument>"
-
-        start = datetime(2020, 6, 1, 0, 0)
-        end = datetime(2020, 6, 1, 1, 0)
+    def test_get_actual_generation_success(self, api_client):
+        """Test successful generation data fetch (live API)"""
+        end = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        start = end - timedelta(hours=2)
 
         result = api_client.get_actual_generation("DE", start, end)
 
         assert result is not None
         assert "Publication_MarketDocument" in result
-        mock_get.assert_called_once()
 
     def test_invalid_country(self, api_client):
         """Test handling of invalid country code"""
