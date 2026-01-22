@@ -87,6 +87,10 @@ st.markdown(
 def get_db():
     return get_connection()
 
+def render_db_error(context, exc):
+    st.error(f"{context} is unavailable because the database connection failed.")
+    st.caption(f"Error: {exc}")
+
 @st.cache_resource
 def get_carbon_service():
     conn = get_db()
@@ -421,7 +425,13 @@ def render_carbon_intelligence(default_country):
     st.markdown("# Carbon Intelligence Dashboard")
     st.markdown("### Real-time CO₂ Intensity Tracking and Optimization")
 
-    service = get_carbon_service()
+    try:
+        conn = get_db()
+        service = CarbonIntensityService(conn)
+    except Exception as exc:
+        st.warning("Database unavailable; using live API data where possible.")
+        st.caption(f"DB error: {exc}")
+        service = CarbonIntensityService(None)
 
     # View mode selector
     col1, col2 = st.columns([2, 1])
@@ -801,7 +811,11 @@ def render_generation_analytics(country, start_date, end_date):
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
 
-    conn = get_db()
+    try:
+        conn = get_db()
+    except Exception as exc:
+        render_db_error("Generation Analytics", exc)
+        return
 
     # Load generation data
     @st.cache_data(ttl=600)
@@ -1048,7 +1062,11 @@ direction and magnitude, not absolute price, as the insight.
         "under `src/models/trained`."
     )
 
-    conn = get_db()
+    try:
+        conn = get_db()
+    except Exception as exc:
+        render_db_error("Grid Regimes & Stress Testing", exc)
+        return
 
     # Latest regime state
     latest = pd.read_sql_query(
@@ -1332,7 +1350,11 @@ def render_data_explorer(country, start_date, end_date):
     st.markdown("# Data Explorer")
     st.markdown("### Database Connectivity and Query Testing")
 
-    conn = get_db()
+    try:
+        conn = get_db()
+    except Exception as exc:
+        render_db_error("Data Explorer", exc)
+        return
 
     if conn is None:
         st.error("Cannot connect to database. Check configuration.")

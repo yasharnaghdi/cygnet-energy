@@ -282,6 +282,15 @@ class CarbonIntensityService:
         if forecast_df is None or forecast_df.empty:
             return None
 
+        forecast_df = forecast_df.copy()
+        forecast_df['co2_intensity'] = pd.to_numeric(
+            forecast_df.get('co2_intensity'),
+            errors='coerce'
+        )
+        forecast_df = forecast_df.dropna(subset=['co2_intensity'])
+        if forecast_df.empty:
+            return None
+
         # Find green hours
         green = forecast_df[forecast_df['co2_intensity'] <= threshold]
         worst = forecast_df.nlargest(3, 'co2_intensity')
