@@ -1,4 +1,7 @@
 import pandas as pd
+import pytest
+
+pytest.importorskip("sklearn")
 
 from src.models.modules_2_regime_detector import RegimeDetector
 
