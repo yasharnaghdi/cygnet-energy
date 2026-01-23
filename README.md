@@ -65,6 +65,12 @@ API reliability: 30-day uptime > 99.5%
 
 ***
 
+## Validation & Evidence
+
+- **Benchmark script**: `scripts/benchmark.py` generates JSON/Markdown reports with data coverage and regime model metrics.
+- **Model card**: `docs/model_card.md` documents intended use, assumptions, and limitations.
+- **Decision & validation notes**: `docs/validation.md` captures scope boundaries, failure modes, and generalization guidance.
+
 ## Core Value Proposition
 
 CYGNET addresses a critical gap in European energy markets: **grid carbon intensity varies 4-6x throughout the day**, but most energy management systems ignore this temporal dimension.
@@ -602,4 +608,3 @@ You should be able to:
 
 **Last Updated:** January 2025
 **Version:** 0.1.0 (MVP)
-

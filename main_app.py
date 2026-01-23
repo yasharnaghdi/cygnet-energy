@@ -24,7 +24,7 @@ from src.services.carbon_service import CarbonIntensityService
 try:
     from src.models.modules_2_regime_detector import RegimeDetector
     from src.models.modules_3_regime_models import RegimeModelEnsemble
-    from src.models.modules_4_stress_tester import StressTester
+    from src.models.modules_4_stress_tester import StressTester, StressScenario
     REGIME_FEATURES_AVAILABLE = True
 except Exception:
     REGIME_FEATURES_AVAILABLE = False
@@ -820,22 +820,98 @@ def render_regimes_and_stress(country):
 
     st.subheader("Current Operating Regime")
 
+    regime_name = str(row.get("regime_name", "Unknown"))
+    regime_confidence = float(row.get("regime_confidence", 0.0))
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Regime", str(row.get("regime_name", "Unknown")))
-    c2.metric("Confidence", f"{float(row.get('regime_confidence', 0.0)):.2f}")
+    c1.metric("Regime", regime_name)
+    c2.metric("Confidence", f"{regime_confidence:.2f}")
     c3.metric("RES Penetration", f"{float(row.get('res_penetration', 0.0)):.1f}%")
     c4.metric("Net Import", f"{float(row.get('net_import', 0.0)):.0f} MW")
 
     st.divider()
+
+    regime_definitions = {
+        "Normal": {
+            "summary": "Balanced supply/demand with moderate imports and stable volatility.",
+            "signals": [
+                "Imports near long-run average",
+                "RES share within seasonal norms",
+                "Low-to-moderate price volatility",
+            ],
+        },
+        "Stressed": {
+            "summary": "System leaning on imports with elevated volatility and tightening capacity.",
+            "signals": [
+                "Rising net imports",
+                "Higher volatility relative to recent history",
+                "Lower renewable share vs typical levels",
+            ],
+        },
+        "RES-Dominant": {
+            "summary": "High renewable penetration with reduced import needs and calmer price dynamics.",
+            "signals": [
+                "Elevated RES penetration",
+                "Lower net imports or net exports",
+                "Volatility subdued",
+            ],
+        },
+    }
+
+    feature_metadata = {
+        "res_penetration": {
+            "label": "Renewable penetration (%)",
+            "range": 100.0,
+            "group": "Supply mix",
+            "why": "Higher RES share typically reduces marginal emissions and dampens price pressure.",
+        },
+        "net_import": {
+            "label": "Net import (MW)",
+            "range": 5000.0,
+            "group": "Cross-border flows",
+            "why": "Rising imports signal tightness and dependence on neighboring systems.",
+        },
+        "price_volatility": {
+            "label": "Price volatility",
+            "range": 50.0,
+            "group": "Market stress",
+            "why": "Higher volatility indicates stress and uncertainty in balancing supply.",
+        },
+        "load_tightness": {
+            "label": "Load tightness",
+            "range": 1.5,
+            "group": "Demand pressure",
+            "why": "Higher values imply demand approaching available capacity.",
+        },
+        "interconnect_saturation": {
+            "label": "Interconnect saturation (%)",
+            "range": 100.0,
+            "group": "Cross-border flows",
+            "why": "High saturation reduces flexibility for cross-border balancing.",
+        },
+    }
+
+    st.markdown("### Regime Definition & Stability")
+    definition = regime_definitions.get(regime_name)
+    with st.expander("Why this regime?", expanded=True):
+        if definition:
+            st.markdown(f"**Summary:** {definition['summary']}")
+            st.markdown("**Typical signals:**")
+            for signal in definition["signals"]:
+                st.markdown(f"- {signal}")
+        else:
+            st.markdown("No definition available for this regime label.")
+
+        if regime_confidence < 0.5:
+            st.warning("Low confidence: this hour may be a transition state. Treat insights as directional.")
 
     # What-if scenario
     st.markdown("### What-If Scenario Analysis")
     st.markdown("Simulate how price reacts to shocks in different regimes")
 
     base_state = {
-        "res_penetration": float(row.get("res_penetration", 0.0)),
-        "net_import": float(row.get("net_import", 0.0)),
-        "price_volatility": float(row.get("price_volatility", 0.0)),
+        feature: float(row.get(feature, 0.0))
+        for feature in tester.feature_names
     }
 
     col_input, col_output = st.columns([1, 2])
@@ -843,7 +919,7 @@ def render_regimes_and_stress(country):
     with col_input:
         feature = st.selectbox(
             "Shock Feature",
-            ["res_penetration", "net_import", "price_volatility"]
+            tester.feature_names
         )
         delta = st.slider("Shock Size", -50.0, 50.0, 10.0, step=1.0)
 
@@ -866,6 +942,91 @@ def render_regimes_and_stress(country):
                 st.write(f"- {text}")
 
     st.divider()
+
+    st.markdown("### Driver Decomposition")
+    st.markdown("Top contributors to the current regime and price pressure context.")
+
+    driver_rows = []
+    for feature in tester.feature_names:
+        meta = feature_metadata.get(feature, {})
+        scale = meta.get("range") or max(abs(base_state[feature]), 1)
+        score = abs(base_state[feature]) / scale
+        driver_rows.append({
+            "Driver": meta.get("label", feature),
+            "Group": meta.get("group", "Other"),
+            "Current value": base_state[feature],
+            "Normalized impact": round(score, 2),
+            "Why it matters": meta.get("why", "Context-specific driver."),
+        })
+
+    driver_df = pd.DataFrame(driver_rows).sort_values("Normalized impact", ascending=False)
+    st.dataframe(driver_df, use_container_width=True, hide_index=True)
+
+    top_drivers = driver_df.head(3)
+    st.markdown("**Top drivers right now:**")
+    for _, driver in top_drivers.iterrows():
+        st.markdown(f"- {driver['Driver']} ({driver['Group']})")
+
+    st.divider()
+
+    st.markdown("### Actionability Mapping")
+    action_playbook = {
+        "Normal": [
+            "Schedule flexible loads with mild preference for low-carbon hours.",
+            "Monitor volatility spikes for early stress signals.",
+        ],
+        "Stressed": [
+            "Delay discretionary consumption and pre-position reserves.",
+            "Hedge price exposure; expect wider spreads during shocks.",
+            "Coordinate with cross-border flows and demand response options.",
+        ],
+        "RES-Dominant": [
+            "Accelerate flexible load shifting to capture low-carbon supply.",
+            "Favor storage charging and export opportunities if available.",
+        ],
+    }
+    actions = action_playbook.get(regime_name, ["No action guidance available for this regime yet."])
+    for action in actions:
+        st.markdown(f"- {action}")
+
+    st.divider()
+
+    st.markdown("### Scenario Library")
+    scenarios = tester.scenario_library()
+    scenario_key = st.selectbox("Select scenario", list(scenarios.keys()))
+    scope = st.radio("Apply scenario to", ["Current regime", "All regimes"], horizontal=True)
+
+    scenario = scenarios[scenario_key]
+    scenario_perturbations = {
+        key: value
+        for key, value in scenario.perturbations.items()
+        if key in tester.feature_names
+    }
+    if len(scenario_perturbations) != len(scenario.perturbations):
+        st.caption("Some scenario drivers are not part of the current model and will be ignored.")
+
+    scenario_to_run = StressScenario(
+        name=scenario.name,
+        description=scenario.description,
+        perturbations=scenario_perturbations,
+        regime_id=scenario.regime_id,
+    )
+
+    if st.button("Run Scenario"):
+        if not scenario_to_run.perturbations:
+            st.warning("This scenario has no applicable drivers for the current model.")
+            return
+        if scope == "Current regime" and row.get("regime_id") is not None:
+            result = tester.run_scenario(
+                scenario_to_run,
+                base_state,
+                regime_id=int(row.get("regime_id")),
+            )
+            st.dataframe(pd.DataFrame([result]), use_container_width=True, hide_index=True)
+        else:
+            results = tester.run_scenario(scenario_to_run, base_state)
+            result_df = pd.DataFrame(results.values())
+            st.dataframe(result_df, use_container_width=True, hide_index=True)
 
     # Model quality
     st.markdown("### Model Coefficients by Regime")
