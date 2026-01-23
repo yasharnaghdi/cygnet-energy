@@ -8,7 +8,7 @@ load_dotenv(env_path)
 
 # ENTSO-E API
 API_TOKEN = os.getenv("API_TOKEN")
-API_BASE_URL = os.getenv("API_BASE_URL", "hhtps://web-api.tp.entsoe.eu/api")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://web-api.tp.entsoe.eu/api")
 API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
 
 #Database

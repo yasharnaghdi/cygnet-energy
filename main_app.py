@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.db.connection import get_connection
 from src.services.carbon_service import CarbonIntensityService
+from src.api.client import EntsoEAPIClient
+from src.api.parser import EntsoEXMLParser
+from src.utils.zones import get_zone_keys
 
 # Optional ML imports
 try:
@@ -104,6 +107,85 @@ def load_regime_stack():
     except Exception as e:
         return None, None, None
 
+@st.cache_data(ttl=600)
+def get_data_coverage(_conn, zone):
+    if _conn is None:
+        return {"min_date": None, "max_date": None, "monthly": pd.DataFrame()}
+
+    zone_keys = get_zone_keys(zone)
+    bounds = pd.read_sql_query(
+        """
+        SELECT MIN(time) AS min_time, MAX(time) AS max_time
+        FROM generation_actual
+        WHERE bidding_zone_mrid = ANY(%s)
+        """,
+        _conn,
+        params=(zone_keys,)
+    )
+    min_time = bounds["min_time"].iloc[0]
+    max_time = bounds["max_time"].iloc[0]
+
+    monthly = pd.read_sql_query(
+        """
+        SELECT date_trunc('month', time) AS month, COUNT(*) AS rows
+        FROM generation_actual
+        WHERE bidding_zone_mrid = ANY(%s)
+        GROUP BY 1
+        ORDER BY 1
+        """,
+        _conn,
+        params=(zone_keys,)
+    )
+
+    return {
+        "min_date": min_time.date() if pd.notnull(min_time) else None,
+        "max_date": max_time.date() if pd.notnull(max_time) else None,
+        "monthly": monthly
+    }
+
+def fetch_generation_data(conn, country, start_dt, end_dt):
+    api_client = EntsoEAPIClient()
+    xml_data = api_client.get_actual_generation(country, start_dt, end_dt)
+    if not xml_data:
+        return 0
+
+    df = EntsoEXMLParser.parse_generation_xml(xml_data)
+    if df is None or df.empty:
+        return 0
+
+    df["bidding_zone_mrid"] = api_client.BIDDING_ZONES.get(country, country)
+    df["quality_code"] = "A"
+    df["data_source"] = "ENTSOE_API"
+
+    records = df[[
+        "time",
+        "bidding_zone_mrid",
+        "psr_type",
+        "actual_generation_mw",
+        "quality_code",
+        "data_source",
+    ]].to_dict("records")
+
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_batch(
+            cur,
+            """
+            INSERT INTO generation_actual
+            (time, bidding_zone_mrid, psr_type, actual_generation_mw, quality_code, data_source)
+            VALUES (%(time)s, %(bidding_zone_mrid)s, %(psr_type)s, %(actual_generation_mw)s, %(quality_code)s, %(data_source)s)
+            ON CONFLICT (time, bidding_zone_mrid, psr_type)
+            DO UPDATE SET actual_generation_mw = EXCLUDED.actual_generation_mw
+            """,
+            records,
+            page_size=1000
+        )
+    conn.commit()
+    return len(records)
+
+def set_global_range(start_date, end_date):
+    st.session_state["global_start"] = start_date
+    st.session_state["global_end"] = end_date
+
 
 # ══════════════════════════════════════════════════════════════
 # GLOBAL SIDEBAR (Control Center)
@@ -122,22 +204,97 @@ global_country = st.sidebar.selectbox(
     help="This selection applies to all tabs"
 )
 
+# Data coverage (for guidance and defaults)
+try:
+    coverage = get_data_coverage(get_db(), global_country)
+except Exception:
+    coverage = {"min_date": None, "max_date": None, "monthly": pd.DataFrame()}
+
 # Global Date Range
 st.sidebar.subheader("Time Window")
-default_end = datetime(2020, 6, 30)
-default_start = default_end - timedelta(days=30)
+default_end = datetime(2020, 6, 30).date()
+default_start = (datetime(2020, 6, 30) - timedelta(days=30)).date()
+
+min_date = coverage.get("min_date")
+max_date = coverage.get("max_date")
+if min_date and max_date:
+    default_end = max_date
+    default_start = max(min_date, max_date - timedelta(days=30))
+
+if "global_start" not in st.session_state:
+    st.session_state["global_start"] = default_start
+if "global_end" not in st.session_state:
+    st.session_state["global_end"] = default_end
+
+def on_live_range_toggle():
+    if st.session_state.get("live_range"):
+        today = datetime.now().date()
+        st.session_state["global_start"] = today - timedelta(days=30)
+        st.session_state["global_end"] = today
+    elif min_date and max_date:
+        st.session_state["global_end"] = max_date
+        st.session_state["global_start"] = max(min_date, max_date - timedelta(days=30))
+
+live_range = st.sidebar.checkbox(
+    "Enable live range (fetch on demand)",
+    value=False,
+    key="live_range",
+    on_change=on_live_range_toggle,
+    help="Allow any date range; data will be fetched from ENTSO-E when needed."
+)
+
+# Ensure defaults sit inside the allowed date bounds before widget instantiation
+if live_range:
+    min_bound = datetime(2015, 1, 1).date()
+    max_bound = datetime(2025, 12, 31).date()
+else:
+    min_bound = min_date or datetime(2015, 1, 1).date()
+    max_bound = max_date or datetime(2025, 12, 31).date()
+if st.session_state["global_start"] < min_bound:
+    st.session_state["global_start"] = min_bound
+if st.session_state["global_start"] > max_bound:
+    st.session_state["global_start"] = max_bound
+if st.session_state["global_end"] < min_bound:
+    st.session_state["global_end"] = min_bound
+if st.session_state["global_end"] > max_bound:
+    st.session_state["global_end"] = max_bound
+if st.session_state["global_start"] > st.session_state["global_end"]:
+    st.session_state["global_start"] = min_bound
+
+if min_date and max_date:
+    st.sidebar.caption(f"DB coverage: {min_date} → {max_date}")
+
+    recent_start = max(min_date, max_date - timedelta(days=30))
+    previous_end = recent_start - timedelta(days=1)
+    previous_start = max(min_date, previous_end - timedelta(days=30))
+
+    if not live_range:
+        col_recent, col_prev = st.sidebar.columns(2)
+        with col_recent:
+            if st.button("Recent 30d", use_container_width=True):
+                st.session_state["global_start"] = recent_start
+                st.session_state["global_end"] = max_date
+                st.rerun()
+        with col_prev:
+            if st.button("Prior 30d", use_container_width=True):
+                st.session_state["global_start"] = previous_start
+                st.session_state["global_end"] = previous_end
+                st.rerun()
+if live_range:
+    st.sidebar.caption("Live range enabled: dates can exceed current DB coverage.")
+st.sidebar.caption(f"Date bounds: {min_bound} → {max_bound}")
 
 global_start = st.sidebar.date_input(
     "Start Date",
-    default_start,
-    min_value=datetime(2015, 1, 1),
-    max_value=datetime(2025, 12, 31)
+    key="global_start",
+    min_value=min_bound,
+    max_value=max_bound
 )
 global_end = st.sidebar.date_input(
     "End Date",
-    default_end,
-    min_value=datetime(2015, 1, 1),
-    max_value=datetime(2025, 12, 31)
+    key="global_end",
+    min_value=min_bound,
+    max_value=max_bound
 )
 
 st.sidebar.divider()
@@ -153,7 +310,7 @@ st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 # TAB RENDERERS
 # ══════════════════════════════════════════════════════════════
 
-def render_overview():
+def render_overview(country, coverage):
     st.markdown("# CYGNET ENERGY")
     st.markdown("## Grid Intelligence and Carbon Optimization Platform")
     st.markdown("---")
@@ -198,6 +355,65 @@ This platform demonstrates:
 3. **Domain Knowledge**: European energy markets & carbon accounting
 4. **Machine Learning**: Regime detection and scenario stress testing
 5. **Production Readiness**: Containerized deployment, clean architecture
+""")
+
+    st.markdown("---")
+    st.markdown("### Insight Planner")
+    st.markdown(
+        "Start with country selection, then use the data coverage view below to pick a "
+        "recent window and a past comparison window. This prevents blind date selection "
+        "and makes regime stress results easier to interpret."
+    )
+
+    monthly = coverage.get("monthly") if coverage else pd.DataFrame()
+    if monthly is not None and not monthly.empty:
+        fig_monthly = px.bar(
+            monthly,
+            x="month",
+            y="rows",
+            title=f"{country} data coverage by month",
+            labels={"month": "Month", "rows": "Rows"}
+        )
+        fig_monthly.update_layout(height=300)
+        st.plotly_chart(fig_monthly, use_container_width=True)
+    else:
+        st.info("No data coverage summary available yet for this zone.")
+
+    min_date = coverage.get("min_date") if coverage else None
+    max_date = coverage.get("max_date") if coverage else None
+    if min_date and max_date:
+        recent_start = max(min_date, max_date - timedelta(days=30))
+        previous_end = recent_start - timedelta(days=1)
+        previous_start = max(min_date, previous_end - timedelta(days=30))
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**Recent window (suggested)**")
+            st.write(f"{recent_start} → {max_date}")
+            st.button(
+                "Use recent window",
+                on_click=set_global_range,
+                args=(recent_start, max_date)
+            )
+        with col_b:
+            st.markdown("**Past window (suggested)**")
+            st.write(f"{previous_start} → {previous_end}")
+            st.button(
+                "Use past window",
+                on_click=set_global_range,
+                args=(previous_start, previous_end)
+            )
+
+        st.caption(
+            "Suggested flow: run Generation Analytics on the past window, then on the "
+            "recent window, and compare shifts in RES penetration and volatility."
+        )
+
+    st.markdown("### Predictive Modules You Can Use Next")
+    st.markdown("""
+- **Scenario Library**: multi-factor shocks mapped to grid events.
+- **Predictive Response Curve**: shows price sensitivity across a shock range.
+- **Regime Coefficients**: explain which features drive outcomes per regime.
 """)
 
 
@@ -590,18 +806,19 @@ def render_generation_analytics(country, start_date, end_date):
     # Load generation data
     @st.cache_data(ttl=600)
     def load_generation_data(_conn, zone, start, end):
+        zone_keys = get_zone_keys(zone)
         cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
             SELECT time, psr_type, actual_generation_mw
             FROM generation_actual
-            WHERE bidding_zone_mrid = %s
+            WHERE bidding_zone_mrid = ANY(%s)
               AND time >= %s
               AND time <= %s
               AND quality_code = 'A'
             ORDER BY time, psr_type
             """,
-            (zone, start, end)
+            (zone_keys, start, end)
         )
         rows = cur.fetchall()
         cur.close()
@@ -612,6 +829,7 @@ def render_generation_analytics(country, start_date, end_date):
     # Load renewable fraction
     @st.cache_data(ttl=600)
     def load_renewable_fraction(_conn, zone, start, end):
+        zone_keys = get_zone_keys(zone)
         cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
@@ -622,12 +840,12 @@ def render_generation_analytics(country, start_date, end_date):
                     THEN actual_generation_mw ELSE 0 END) as fossil_gen,
                 SUM(actual_generation_mw) as total_gen
             FROM generation_actual
-            WHERE bidding_zone_mrid = %s
+            WHERE bidding_zone_mrid = ANY(%s)
               AND time >= %s
               AND time <= %s
               AND quality_code = 'A'
             """,
-            (zone, start, end)
+            (zone_keys, start, end)
         )
         result = cur.fetchone()
         cur.close()
@@ -638,7 +856,16 @@ def render_generation_analytics(country, start_date, end_date):
 
     if df.empty:
         st.error(f"No data found for {country} between {start_date} and {end_date}")
-        st.info("Try selecting dates in 2020 (e.g., June 2020)")
+        st.info("You can fetch the selected period directly from ENTSO-E.")
+
+        if st.button("Fetch from ENTSO-E API for this period", key="fetch_gen_analytics"):
+            with st.spinner("Fetching live data and storing in the database..."):
+                inserted = fetch_generation_data(conn, country, start_dt, end_dt)
+            if inserted > 0:
+                st.success(f"Inserted {inserted:,} rows. Reloading view...")
+                st.rerun()
+            else:
+                st.warning("No data returned for this range. Try a shorter window.")
         return
 
     # Metrics row
@@ -797,6 +1024,30 @@ def render_regimes_and_stress(country):
         st.error("Could not load trained models.")
         return
 
+    with st.expander("How the 4 modules work (and how to read them)", expanded=False):
+        st.markdown("""
+**Module 1: State Variables**
+Turns raw generation into 5 operating gauges: load tightness, RES penetration, net import,
+interconnect saturation, and price volatility. These are the inputs to all regimes.
+
+**Module 2: Regime Detector**
+Clusters system states into operating modes. Confidence reflects distance to the nearest
+cluster center, not forecast certainty.
+
+**Module 3: Regime Models**
+Fits a separate linear model per regime so sensitivity (coefficients) changes by regime.
+Use R²/MAE and sample size to judge reliability.
+
+**Module 4: Stress Tester**
+Applies counterfactual shocks to the state variables and shows price impact deltas. Use
+direction and magnitude, not absolute price, as the insight.
+""")
+
+    st.caption(
+        "Inputs for this view come from the `regime_states` table and the trained models "
+        "under `src/models/trained`."
+    )
+
     conn = get_db()
 
     # Latest regime state
@@ -826,16 +1077,68 @@ def render_regimes_and_stress(country):
     c3.metric("RES Penetration", f"{float(row.get('res_penetration', 0.0)):.1f}%")
     c4.metric("Net Import", f"{float(row.get('net_import', 0.0)):.0f} MW")
 
+    required_features = ensemble.feature_names or [
+        "res_penetration",
+        "net_import",
+        "price_volatility",
+    ]
+    current_regime_id = row.get("regime_id")
+    if pd.isna(current_regime_id):
+        current_regime_id = None
+    if current_regime_id is not None:
+        current_regime_id = int(current_regime_id)
+    missing_values = [feat for feat in required_features if feat not in row.index]
+    if missing_values:
+        st.warning(
+            "Missing required features in `regime_states`: "
+            + ", ".join(missing_values)
+        )
+
+    if detector and all(
+        feat in row.index
+        for feat in ["res_penetration", "net_import", "price_volatility"]
+    ):
+        live_pred = detector.predict_regime(
+            float(row.get("res_penetration", 0.0)),
+            float(row.get("net_import", 0.0)),
+            float(row.get("price_volatility", 0.0)),
+        )
+        stored_regime = str(row.get("regime_name", "Unknown"))
+        st.caption(
+            "Detector check: model predicts "
+            f"{live_pred['regime_name']} (conf {live_pred['confidence']:.2f}); "
+            f"stored regime is {stored_regime}."
+        )
+        if stored_regime not in ("Unknown", live_pred["regime_name"]):
+            st.warning(
+                "Stored regime name differs from live detector output. "
+                "Consider re-running the regime assignment pipeline."
+            )
+        if current_regime_id is None:
+            current_regime_id = live_pred["regime_id"]
+
+        profile = detector.regime_profile(live_pred["regime_id"])
+        st.markdown("**Regime profile (typical center)**")
+        st.write(
+            f"RES penetration {profile['res_penetration']:.1f}%, "
+            f"net import {profile['net_import']:.0f} MW, "
+            f"price volatility {profile['price_volatility']:.1f}."
+        )
+
     st.divider()
 
     # What-if scenario
     st.markdown("### What-If Scenario Analysis")
     st.markdown("Simulate how price reacts to shocks in different regimes")
 
+    feature_ranges = {
+        "res_penetration": (-20.0, 20.0, 5.0),
+        "net_import": (-500.0, 500.0, 100.0),
+        "price_volatility": (-30.0, 30.0, 5.0),
+    }
     base_state = {
-        "res_penetration": float(row.get("res_penetration", 0.0)),
-        "net_import": float(row.get("net_import", 0.0)),
-        "price_volatility": float(row.get("price_volatility", 0.0)),
+        feature: float(row.get(feature, 0.0))
+        for feature in required_features
     }
 
     col_input, col_output = st.columns([1, 2])
@@ -843,9 +1146,10 @@ def render_regimes_and_stress(country):
     with col_input:
         feature = st.selectbox(
             "Shock Feature",
-            ["res_penetration", "net_import", "price_volatility"]
+            required_features
         )
-        delta = st.slider("Shock Size", -50.0, 50.0, 10.0, step=1.0)
+        min_val, max_val, default_val = feature_ranges.get(feature, (-50.0, 50.0, 10.0))
+        delta = st.slider("Shock Size", min_val, max_val, default_val, step=1.0)
 
         if st.button("Run Cross-Regime Stress Test"):
             result = tester.regime_comparison(base_state, feature, delta)
@@ -867,12 +1171,161 @@ def render_regimes_and_stress(country):
 
     st.divider()
 
+    st.markdown("### Scenario Library")
+    st.markdown("Pre-built multi-factor shocks mapped to common grid events.")
+
+    scenarios = tester.scenario_library()
+    scenario_names = list(scenarios.keys())
+    selected_key = st.selectbox(
+        "Choose a scenario",
+        scenario_names,
+        format_func=lambda key: scenarios[key].name
+    )
+    scenario = scenarios[selected_key]
+    st.caption(scenario.description)
+
+    scenario_features = [feat for feat in scenario.perturbations.keys() if feat not in base_state]
+    if scenario_features:
+        st.warning(
+            "Scenario uses features not in the current model: "
+            + ", ".join(scenario_features)
+        )
+    elif st.button("Run Scenario Across Regimes"):
+        scenario_results = tester.run_scenario(scenario, base_state)
+        rows = []
+        narratives = []
+        for regime_id, outcome in scenario_results.items():
+            rows.append({
+                "regime_name": outcome["regime_name"],
+                "baseline_pred": outcome["baseline_pred"],
+                "shocked_pred": outcome["shocked_pred"],
+                "delta_pred": outcome["delta_pred"],
+                "pct_change": outcome["pct_change"],
+            })
+            narratives.append(tester.narrative(outcome))
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True
+        )
+        st.markdown("**Narratives:**")
+        for text in narratives:
+            st.write(f"- {text}")
+
+    st.divider()
+
+    st.markdown("### Predictive Response Curve")
+    st.markdown(
+        "Quantify the price impact of shocks and compare sensitivity across regimes. "
+        "Use this to evaluate which levers move price most."
+    )
+
+    if current_regime_id is None:
+        st.info("Current regime ID unavailable. Add `regime_id` to `regime_states` to enable.")
+    else:
+        curve_feature = st.selectbox(
+            "Feature to sweep",
+            required_features,
+            key="curve_feature"
+        )
+        curve_min, curve_max, _ = feature_ranges.get(curve_feature, (-50.0, 50.0, 10.0))
+        curve_range = st.slider(
+            "Shock range",
+            curve_min,
+            curve_max,
+            (curve_min, curve_max),
+            step=1.0
+        )
+        curve_points = st.slider("Resolution", 6, 24, 12)
+        compare_regimes = st.checkbox("Compare all regimes", value=True)
+
+        curve_df = tester.sensitivity_curve(
+            current_regime_id,
+            base_state,
+            curve_feature,
+            curve_range,
+            n_points=curve_points
+        )
+
+        if compare_regimes:
+            all_curves = []
+            for rid in sorted(ensemble.models.keys()):
+                df = tester.sensitivity_curve(
+                    rid,
+                    base_state,
+                    curve_feature,
+                    curve_range,
+                    n_points=curve_points
+                )
+                df["regime_id"] = rid
+                all_curves.append(df)
+            combined = pd.concat(all_curves, ignore_index=True)
+            fig_curve = px.line(
+                combined,
+                x="feature_value",
+                y="predicted_output",
+                color="regime_id",
+                title="Predicted price response by regime",
+                labels={"feature_value": curve_feature, "predicted_output": "Predicted price"}
+            )
+        else:
+            fig_curve = px.line(
+                curve_df,
+                x="feature_value",
+                y="predicted_output",
+                title=f"Predicted price response in Regime {current_regime_id}",
+                labels={"feature_value": curve_feature, "predicted_output": "Predicted price"}
+            )
+
+        fig_curve.update_layout(height=320)
+        st.plotly_chart(fig_curve, use_container_width=True)
+
+        step_map = {
+            "res_penetration": 1.0,
+            "net_import": 50.0,
+            "price_volatility": 1.0,
+        }
+        delta_step = step_map.get(curve_feature, 1.0)
+        impact = tester.stress_single_feature(
+            current_regime_id,
+            base_state,
+            curve_feature,
+            delta_step
+        )
+        baseline = impact["baseline_pred"]
+        per_unit = impact["delta_pred"]
+        pct_change = impact["pct_change"]
+
+        st.markdown("**Impact summary (current regime)**")
+        st.write(
+            f"Baseline: {baseline:.2f} | "
+            f"Δ per {delta_step:g} {curve_feature}: {per_unit:+.2f} "
+            f"({pct_change:+.2f}%)"
+        )
+
+    st.divider()
+
     # Model quality
     st.markdown("### Model Coefficients by Regime")
     st.markdown("How each feature drives price in different operating modes")
 
     coef_df = ensemble.coefficient_comparison()
     st.dataframe(coef_df, use_container_width=True)
+
+    metrics_rows = []
+    for regime_id, model in ensemble.models.items():
+        if model.metrics:
+            metrics_rows.append({
+                "regime_id": regime_id,
+                "regime_name": model.regime_name,
+                "r2": model.metrics.get("r2"),
+                "mae": model.metrics.get("mae"),
+                "rmse": model.metrics.get("rmse"),
+                "n_samples": model.metrics.get("n_samples"),
+            })
+    if metrics_rows:
+        st.markdown("### Model Fit Diagnostics")
+        st.dataframe(pd.DataFrame(metrics_rows), use_container_width=True, hide_index=True)
 
 
 def render_data_explorer(country, start_date, end_date):
@@ -892,22 +1345,39 @@ def render_data_explorer(country, start_date, end_date):
     # Data query
     try:
         cursor = conn.cursor()
+        start_dt = datetime.combine(start_date, datetime.min.time())
+        end_dt = datetime.combine(end_date, datetime.max.time())
+        zone_keys = get_zone_keys(country)
 
-        # Count query
+        # Count total records
         cursor.execute(
-            f"""
+            """
             SELECT COUNT(*)
             FROM generation_actual
-            WHERE bidding_zone_mrid = '{country}'
-            """
+            WHERE bidding_zone_mrid = ANY(%s)
+            """,
+            (zone_keys,)
         )
-        count = cursor.fetchone()[0]
+        total_count = cursor.fetchone()[0]
+
+        # Count records in selected range
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM generation_actual
+            WHERE bidding_zone_mrid = ANY(%s)
+              AND time >= %s
+              AND time <= %s
+            """,
+            (zone_keys, start_dt, end_dt)
+        )
+        range_count = cursor.fetchone()[0]
 
         # Display metrics
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric("Total Records", f"{count:,}")
+            st.metric("Total Records", f"{total_count:,}")
 
         with col2:
             st.metric("Country", country)
@@ -916,37 +1386,65 @@ def render_data_explorer(country, start_date, end_date):
             st.metric("Date Range", f"{(end_date - start_date).days} days")
 
         st.divider()
+        st.caption(f"Selected range: {start_date} → {end_date}")
+
+        coverage = get_data_coverage(conn, country)
+        if coverage.get("min_date") and coverage.get("max_date"):
+            st.caption(
+                f"Available data for {country}: "
+                f"{coverage['min_date']} → {coverage['max_date']}"
+            )
+        else:
+            st.info(
+                f"No stored generation data found for {country}. "
+                "Data coverage is currently strongest for DE."
+            )
+
+        if range_count == 0:
+            if st.button("Fetch from ENTSO-E API for this period", key="fetch_data_explorer"):
+                with st.spinner("Fetching live data and storing in the database..."):
+                    inserted = fetch_generation_data(conn, country, start_dt, end_dt)
+                if inserted > 0:
+                    st.success(f"Inserted {inserted:,} rows. Reloading view...")
+                    st.rerun()
+                else:
+                    st.warning("No data returned for this range. Try a shorter window.")
 
         # Sample data
         st.markdown("### Sample Data")
 
-        cursor.execute(
-            f"""
-            SELECT time, psr_type, actual_generation_mw
-            FROM generation_actual
-            WHERE bidding_zone_mrid = '{country}'
-              AND time >= '{start_date}'
-              AND time <= '{end_date}'
-            ORDER BY time DESC
-            LIMIT 100;
-            """
-        )
-        rows = cursor.fetchall()
-
-        if rows:
-            df = pd.DataFrame(rows, columns=['Timestamp', 'Source Type', 'Generation (MW)'])
-            st.dataframe(df, use_container_width=True, height=400)
-
-            # Download button
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "Download CSV",
-                csv,
-                f"generation_data_{country}_{start_date}.csv",
-                "text/csv",
+        if range_count > 0:
+            cursor.execute(
+                """
+                SELECT time, psr_type, actual_generation_mw
+                FROM generation_actual
+                WHERE bidding_zone_mrid = ANY(%s)
+                  AND time >= %s
+                  AND time <= %s
+                ORDER BY time DESC
+                LIMIT 100;
+                """,
+                (zone_keys, start_dt, end_dt)
             )
+            rows = cursor.fetchall()
+
+            if rows:
+                df = pd.DataFrame(rows, columns=['Timestamp', 'Source Type', 'Generation (MW)'])
+                st.dataframe(df, use_container_width=True, height=400)
+
+                # Download button
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "Download CSV",
+                    csv,
+                    f"generation_data_{country}_{start_date}.csv",
+                    "text/csv",
+                )
+            else:
+                st.warning(f"No data found for {country} in selected date range")
         else:
             st.warning(f"No data found for {country} in selected date range")
+            st.caption("Use live range and fetch data for the selected window.")
 
         cursor.close()
 
@@ -961,37 +1459,45 @@ def render_technical_info():
 
     with tab1:
         st.markdown("### System Architecture")
-        st.code(
-            """
-┌─────────────────────────────────────┐
-│ ENTSO-E Transparency API            │
-└──────────────┬──────────────────────┘
-               │ (XML)
-               ▼
-┌─────────────────────────────────────┐
-│ API Client & XML Parser             │
-│ (src/api/client.py, parser.py)     │
-└──────────────┬──────────────────────┘
-               │ (DataFrame)
-               ▼
-┌─────────────────────────────────────┐
-│ PostgreSQL Database                 │
-│ (generation_actual table)           │
-└──────────────┬──────────────────────┘
-               │ (SQL Queries)
-               ▼
-┌─────────────────────────────────────┐
-│ Carbon Service Layer                │
-│ (src/services/carbon_service.py)   │
-└──────────────┬──────────────────────┘
-               │ (Data Objects)
-               ▼
-┌─────────────────────────────────────┐
-│ Streamlit Dashboard (main_app.py)  │
-└─────────────────────────────────────┘
-""",
-            language="text"
+        st.markdown(
+            "This pipeline exists to turn raw grid telemetry into decisions. "
+            "We pull operational data, convert it into consistent state variables, "
+            "then explain regimes and stress impacts in plain terms."
         )
+
+        st.graphviz_chart("""
+digraph {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", color="#1f77b4", fillcolor="#e8f0fe"];
+  entsoe [label="ENTSO-E API\\nRaw XML"];
+  api [label="API Client & Parser\\nNormalized DataFrame"];
+  db [label="PostgreSQL\\nHistorical Storage"];
+  svc [label="Service Layer\\nCarbon + Regime Inputs"];
+  ml [label="ML Modules\\nRegimes + Stress Tests"];
+  ui [label="Streamlit UI\\nGuided Insights"];
+  entsoe -> api -> db -> svc -> ml -> ui;
+}
+""")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown("**Why this matters**")
+            st.markdown(
+                "Grid emissions depend on *when* you consume electricity. "
+                "We need time-aligned signals, not annual averages."
+            )
+        with col2:
+            st.markdown("**What we measure**")
+            st.markdown(
+                "State variables capture stress, renewable share, and volatility "
+                "so regimes are operationally meaningful."
+            )
+        with col3:
+            st.markdown("**How we act**")
+            st.markdown(
+                "Regime-aware stress tests show directional risk. "
+                "This guides decisions like shifting load or hedging."
+            )
 
     with tab2:
         st.markdown("### Data Pipeline")
@@ -1063,29 +1569,25 @@ def render_technical_info():
 # MAIN NAVIGATION
 # ══════════════════════════════════════════════════════════════
 
-tabs = st.tabs([
+sections = [
     "Overview",
     "Carbon Intelligence",
     "Generation Analytics",
     "Grid Regimes & Stress Testing",
     "Data Explorer",
-    "Technical Info"
-])
+    "Technical Info",
+]
+section = st.sidebar.radio("Navigate", sections, key="section")
 
-with tabs[0]:
-    render_overview()
-
-with tabs[1]:
+if section == "Overview":
+    render_overview(global_country, coverage)
+elif section == "Carbon Intelligence":
     render_carbon_intelligence(global_country)
-
-with tabs[2]:
+elif section == "Generation Analytics":
     render_generation_analytics(global_country, global_start, global_end)
-
-with tabs[3]:
+elif section == "Grid Regimes & Stress Testing":
     render_regimes_and_stress(global_country)
-
-with tabs[4]:
+elif section == "Data Explorer":
     render_data_explorer(global_country, global_start, global_end)
-
-with tabs[5]:
+elif section == "Technical Info":
     render_technical_info()

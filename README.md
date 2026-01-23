@@ -107,11 +107,11 @@ Core capabilities:
 - Renewable classification logic for accurate green/fossil split
 
 ### Application Layer
-**Streamlit Dashboard** (`streamlit_carbon_app.py`)[4]
+**Streamlit Dashboard** (`main_app.py`)
 - Plotly-based interactive visualizations
 - Responsive multi-column layouts
-- Real-time data refresh with caching
-- Multi-country comparison mode (WIP)
+- Live range mode with on-demand ENTSO-E fetch
+- Regime stress testing with scenario library + sensitivity curves
 
 **Extensible API Foundation**
 - FastAPI + Uvicorn stack configured in dependencies[5]
@@ -158,8 +158,9 @@ cygnet-energy/
 │   ├── models/
 │   │   └── generation.py        # Domain models
 │   └── utils/
-│       └── config.py            # Configuration loader
-├── streamlit_carbon_app.py      # Production dashboard
+│       ├── config.py            # Configuration loader
+│       └── zones.py             # Country ↔ bidding zone helpers
+├── main_app.py                  # Production dashboard
 ├── tests/
 │   ├── unit/                    # Service layer tests
 │   └── integration/             # API + DB tests
@@ -187,7 +188,7 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
 **Current focus:**
 
 - One fully populated bidding zone in DB: **DE** (Germany, from CSV)
-- Other countries (**FR, GB, ES, IT**) fetched in **real time from ENTSO-E API**
+- Other countries (**FR, GB, ES, IT**) fetched **on demand from ENTSO-E API**
 - Clear separation between:
   - Historical database-backed analytics (for DE)
   - Live API-backed analytics (for other countries)
@@ -245,7 +246,7 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
         - Renewable vs fossil shares
         - Status bucket: LOW / MODERATE / HIGH / CRITICAL
     - **get_24h_forecast(country)**:
-      - Uses historical DB data (DE) to build an hour-of-day average–based “profile” forecast[4]
+      - Uses historical DB data when available; falls back to last-24h live API profile if DB is empty
     - **get_green_hours(country, threshold)**:
       - Identifies hours with intensity below a threshold, returns best/worst hours + savings potential[4]
     - **calculate_charging_impact(num_evs, daily_charging_mwh)**:
@@ -254,11 +255,11 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
 ### Frontend / Visualization
 
 - **Streamlit**:
-  - Multiple entry points exist; the current main one is:
-    - `streamlit_carbon_app.py` – “Carbon Intelligence Dashboard”[6]
+  - Current main entry point:
+    - `main_app.py` – “Grid Intelligence Dashboard”
   - Uses:
-    - `plotly.graph_objects` and `plotly.express` for charts[6]
-    - Responsive layout with `st.columns` for metrics and comparison views[6]
+    - `plotly.graph_objects` and `plotly.express` for charts
+    - Responsive layout with `st.columns` for metrics and comparison views
 
 **Key UI features already present:**
 
@@ -269,8 +270,8 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
    - Status indicator and timestamp[6][4]
 2. **Generation mix chart**:
    - Horizontal bar chart showing emissions by source (using PSR names and calculated emissions)[6][4]
-3. **24-hour forecast (DE)**:
-   - Intensity curve with color bands and a 200 gCO₂/kWh “green” reference[6]
+3. **24-hour forecast (DB + live fallback)**:
+   - Intensity curve with color bands and a 200 gCO₂/kWh “green” reference
 4. **EV charging impact widget**:
    - Compares “peak” vs “green” charging cost and CO₂ for a configurable fleet size and energy use[4][6]
 
@@ -305,10 +306,11 @@ cygnet-energy/
 │   ├── services/
 │   │   └── carbon_service.py    # CarbonIntensityService core logic
 │   └── utils/
-│       └── config.py            # App config loader (env + yaml)
-├── streamlit_carbon_app.py      # Main dashboard
-├── streamlit_app.py             # Earlier Streamlit variant (legacy)
-├── streamlit_minimal.py         # Minimal/experimental UI (legacy)
+│       ├── config.py            # App config loader (env + yaml)
+│       └── zones.py             # Country ↔ bidding zone helpers
+├── main_app.py                  # Main dashboard
+├── streamlit_app.py             # Legacy Streamlit variant (deprecated)
+├── streamlit_minimal.py         # Legacy/minimal UI (deprecated)
 ├── tests/
 │   ├── unit/
 │   └── integration/
@@ -355,8 +357,17 @@ poetry run python scripts/load_csv_to_db.py
 ### Run Dashboard
 
 ```bash
-poetry run streamlit run streamlit_carbon_app.py
+poetry run streamlit run main_app.py
 ```
+
+**Live range usage**
+- Enable “Live range (fetch on demand)” in the sidebar to pick dates outside DB coverage.
+- Use “Fetch from ENTSO-E API for this period” in Generation Analytics or Data Explorer to populate the DB for that window.
+
+**Troubleshooting live range**
+- If the date picker is still locked to a single month, toggle live range off/on and confirm the sidebar shows “Date bounds: 2015-01-01 → 2025-12-31”.
+- If you see “No data found” after selecting a window, click the fetch button to populate the database for that range.
+- If the fetch inserts 0 rows, try a shorter window (ENTSO-E can return empty responses for long ranges).
 
 Access at `http://localhost:8501`
 
@@ -544,7 +555,7 @@ poetry run python scripts/load_csv_to_db.py
 ### 4.5. Run the Streamlit dashboard
 
 ```bash
-poetry run streamlit run streamlit_carbon_app.py
+poetry run streamlit run main_app.py
 ```
 
 Open the URL shown in the terminal (typically `http://localhost:8501`).[6]

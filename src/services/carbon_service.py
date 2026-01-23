@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 from src.api.client import EntsoEAPIClient
 from src.api.parser import EntsoEXMLParser
+from src.utils.zones import get_zone_keys
 import psycopg2
 from psycopg2 import sql
 import logging
@@ -136,14 +137,19 @@ class CarbonIntensityService:
 
         try:
             cursor = self.conn.cursor()
+            zone_keys = get_zone_keys(country)
 
             cursor.execute("""
                 SELECT time, psr_type, actual_generation_mw
                 FROM generation_actual
-                WHERE bidding_zone_mrid = %s
-                AND time = (SELECT MAX(time) FROM generation_actual WHERE bidding_zone_mrid = %s)
+                WHERE bidding_zone_mrid = ANY(%s)
+                AND time = (
+                    SELECT MAX(time)
+                    FROM generation_actual
+                    WHERE bidding_zone_mrid = ANY(%s)
+                )
                 ORDER BY time DESC, psr_type
-            """, (country, country))
+            """, (zone_keys, zone_keys))
 
             rows = cursor.fetchall()
             cursor.close()
@@ -194,6 +200,7 @@ class CarbonIntensityService:
         """
         try:
             cursor = self.conn.cursor()
+            zone_keys = get_zone_keys(country)
 
             # Get average generation by hour of day for past 30 days
             cursor.execute("""
@@ -202,18 +209,18 @@ class CarbonIntensityService:
                     psr_type,
                     AVG(actual_generation_mw) as avg_generation
                 FROM generation_actual
-                WHERE bidding_zone_mrid LIKE %s
+                WHERE bidding_zone_mrid = ANY(%s)
                 AND time >= NOW() - INTERVAL '30 days'
                 AND time < NOW()
                 GROUP BY hour_of_day, psr_type
                 ORDER BY hour_of_day, psr_type
-            """, (f'%{country}%',))
+            """, (zone_keys,))
 
             rows = cursor.fetchall()
             cursor.close()
 
             if not rows:
-                return None
+                return self._forecast_from_live_api(country, hours)
 
             # Build forecast
             forecast_data = []
@@ -249,7 +256,7 @@ class CarbonIntensityService:
 
         except Exception as e:
             logger.error(f"Forecast error: {e}")
-            return None
+            return self._forecast_from_live_api(country, hours)
 
     def get_green_hours(self, country: str, threshold: float = 200) -> Optional[Dict]:
         """
@@ -273,6 +280,15 @@ class CarbonIntensityService:
         forecast_df = self.get_24h_forecast(country)
 
         if forecast_df is None or forecast_df.empty:
+            return None
+
+        forecast_df = forecast_df.copy()
+        forecast_df['co2_intensity'] = pd.to_numeric(
+            forecast_df.get('co2_intensity'),
+            errors='coerce'
+        )
+        forecast_df = forecast_df.dropna(subset=['co2_intensity'])
+        if forecast_df.empty:
             return None
 
         # Find green hours
@@ -303,6 +319,59 @@ class CarbonIntensityService:
                 'cost_reduction_pct': round(co2_reduction_pct * 0.8, 1)  # Rough estimate
             }
         }
+
+    def _forecast_from_live_api(self, country: str, hours: int = 24) -> Optional[pd.DataFrame]:
+        """Fallback: build a near-term profile from the last 24h of live API data."""
+        try:
+            api_client = EntsoEAPIClient()
+            end_date = datetime.now()
+            start_date = end_date - timedelta(hours=24)
+
+            xml_response = api_client.get_actual_generation(country, start_date, end_date)
+            if not xml_response:
+                return None
+
+            df = EntsoEXMLParser.parse_generation_xml(xml_response)
+            if df is None or df.empty:
+                return None
+
+            df['hour'] = pd.to_datetime(df['time']).dt.hour
+            hourly = (
+                df.groupby(['hour', 'psr_type'])['actual_generation_mw']
+                .mean()
+                .reset_index()
+            )
+
+            forecast_data = []
+            now = datetime.now().replace(minute=0, second=0, microsecond=0)
+            for i in range(hours):
+                forecast_time = now + timedelta(hours=i)
+                hour_of_day = forecast_time.hour
+
+                mix = {}
+                total_gen = 0
+                subset = hourly[hourly['hour'] == hour_of_day]
+                for _, row in subset.iterrows():
+                    mix[row['psr_type']] = row['actual_generation_mw']
+                    total_gen += row['actual_generation_mw']
+
+                if total_gen > 0:
+                    intensity = self._calculate_intensity(mix, total_gen)
+                    renewable_pct = self._get_renewable_pct(mix, total_gen)
+                    forecast_data.append({
+                        'timestamp': forecast_time,
+                        'hour': hour_of_day,
+                        'co2_intensity': round(intensity, 2),
+                        'renewable_pct': round(renewable_pct, 1),
+                        'status': self._get_status(intensity),
+                        'data_source': 'Live API (last 24h)'
+                    })
+
+            return pd.DataFrame(forecast_data)
+
+        except Exception as e:
+            logger.error(f"Live API fallback error: {e}")
+            return None
 
     def calculate_charging_impact(
         self,
