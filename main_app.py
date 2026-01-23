@@ -87,10 +87,6 @@ st.markdown(
 def get_db():
     return get_connection()
 
-def render_db_error(context, exc):
-    st.error(f"{context} is unavailable because the database connection failed.")
-    st.caption(f"Error: {exc}")
-
 @st.cache_resource
 def get_carbon_service():
     conn = get_db()
@@ -425,13 +421,7 @@ def render_carbon_intelligence(default_country):
     st.markdown("# Carbon Intelligence Dashboard")
     st.markdown("### Real-time CO₂ Intensity Tracking and Optimization")
 
-    try:
-        conn = get_db()
-        service = CarbonIntensityService(conn)
-    except Exception as exc:
-        st.warning("Database unavailable; using live API data where possible.")
-        st.caption(f"DB error: {exc}")
-        service = CarbonIntensityService(None)
+    service = get_carbon_service()
 
     # View mode selector
     col1, col2 = st.columns([2, 1])
@@ -811,11 +801,7 @@ def render_generation_analytics(country, start_date, end_date):
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
 
-    try:
-        conn = get_db()
-    except Exception as exc:
-        render_db_error("Generation Analytics", exc)
-        return
+    conn = get_db()
 
     # Load generation data
     @st.cache_data(ttl=600)
@@ -1040,19 +1026,19 @@ def render_regimes_and_stress(country):
 
     with st.expander("How the 4 modules work (and how to read them)", expanded=False):
         st.markdown("""
-**Module 1: State Variables**  
+**Module 1: State Variables**
 Turns raw generation into 5 operating gauges: load tightness, RES penetration, net import,
 interconnect saturation, and price volatility. These are the inputs to all regimes.
 
-**Module 2: Regime Detector**  
+**Module 2: Regime Detector**
 Clusters system states into operating modes. Confidence reflects distance to the nearest
 cluster center, not forecast certainty.
 
-**Module 3: Regime Models**  
+**Module 3: Regime Models**
 Fits a separate linear model per regime so sensitivity (coefficients) changes by regime.
 Use R²/MAE and sample size to judge reliability.
 
-**Module 4: Stress Tester**  
+**Module 4: Stress Tester**
 Applies counterfactual shocks to the state variables and shows price impact deltas. Use
 direction and magnitude, not absolute price, as the insight.
 """)
@@ -1062,11 +1048,7 @@ direction and magnitude, not absolute price, as the insight.
         "under `src/models/trained`."
     )
 
-    try:
-        conn = get_db()
-    except Exception as exc:
-        render_db_error("Grid Regimes & Stress Testing", exc)
-        return
+    conn = get_db()
 
     # Latest regime state
     latest = pd.read_sql_query(
@@ -1350,11 +1332,7 @@ def render_data_explorer(country, start_date, end_date):
     st.markdown("# Data Explorer")
     st.markdown("### Database Connectivity and Query Testing")
 
-    try:
-        conn = get_db()
-    except Exception as exc:
-        render_db_error("Data Explorer", exc)
-        return
+    conn = get_db()
 
     if conn is None:
         st.error("Cannot connect to database. Check configuration.")
@@ -1591,29 +1569,25 @@ digraph {
 # MAIN NAVIGATION
 # ══════════════════════════════════════════════════════════════
 
-tabs = st.tabs([
+sections = [
     "Overview",
     "Carbon Intelligence",
     "Generation Analytics",
     "Grid Regimes & Stress Testing",
     "Data Explorer",
-    "Technical Info"
-])
+    "Technical Info",
+]
+section = st.sidebar.radio("Navigate", sections, key="section")
 
-with tabs[0]:
+if section == "Overview":
     render_overview(global_country, coverage)
-
-with tabs[1]:
+elif section == "Carbon Intelligence":
     render_carbon_intelligence(global_country)
-
-with tabs[2]:
+elif section == "Generation Analytics":
     render_generation_analytics(global_country, global_start, global_end)
-
-with tabs[3]:
+elif section == "Grid Regimes & Stress Testing":
     render_regimes_and_stress(global_country)
-
-with tabs[4]:
+elif section == "Data Explorer":
     render_data_explorer(global_country, global_start, global_end)
-
-with tabs[5]:
+elif section == "Technical Info":
     render_technical_info()
