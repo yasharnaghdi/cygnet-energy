@@ -23,5 +23,5 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 
 INSERT INTO metadata (key, value)
-VALUES ('schema_version', '1.0.0')
+VALUES ('schema_version', '1.0.1')
 ON CONFLICT (key) DO NOTHING;

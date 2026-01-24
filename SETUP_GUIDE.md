@@ -67,26 +67,24 @@ cygnet-energy/
 │   ├── __init__.py
 │   ├── api/
 │   │   └── __init__.py
-│   ├── collector/
-│   │   └── __init__.py
 │   ├── models/
+│   │   └── __init__.py
+│   ├── services/
+│   │   └── __init__.py
+│   ├── utils/
 │   │   └── __init__.py
 │   └── db/
 │       └── __init__.py
 ├── tests/
 │   ├── __init__.py
-│   ├── unit/
-│   │   └── __init__.py
-│   └── integration/
-│       └── __init__.py
 ├── config/
 │   └── config.yaml.example
 ├── scripts/
 │   ├── init_db.py
-│   └── lint.sh
-├── docs/
-│   └── (documentation files)
-└── logs/ (auto-created at runtime)
+│   ├── load_csv_to_db.py
+│   └── smoke_check.py
+└── data/
+    └── samples/
 ```
 
 **Create Empty __init__.py Files:**
@@ -95,12 +93,11 @@ cygnet-energy/
 # From cygnet-energy directory
 touch src/__init__.py
 touch src/api/__init__.py
-touch src/collector/__init__.py
 touch src/models/__init__.py
+touch src/services/__init__.py
+touch src/utils/__init__.py
 touch src/db/__init__.py
 touch tests/__init__.py
-touch tests/unit/__init__.py
-touch tests/integration/__init__.py
 ```
 
 **Create Example Config:**
@@ -237,19 +234,13 @@ from fastapi import FastAPI
 
 app = FastAPI(
     title="Cygnet Energy API",
-    version="0.1.0",
+    version="1.0.1",
     description="European grid intelligence platform"
 )
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "version": "0.1.0"}
-```
-
-**collector/__init__.py:**
-```python
-"""Data collection module."""
-__version__ = "0.1.0"
+    return {"status": "ok", "version": "1.0.1"}
 ```
 
 **models/__init__.py:**
@@ -271,7 +262,7 @@ __all__ = ['GenerationReading']
 **db/__init__.py:**
 ```python
 """Database connection and queries."""
-__version__ = "0.1.0"
+__version__ = "1.0.1"
 ```
 
 ### ⏳ Phase 5: First Test Run
@@ -284,7 +275,7 @@ python -m uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 **In another terminal, test:**
 ```bash
 curl http://localhost:8000/health
-# Expected: {"status":"ok","version":"0.1.0"}
+# Expected: {"status":"ok","version":"1.0.1"}
 ```
 
 ---
@@ -295,18 +286,14 @@ curl http://localhost:8000/health
 
 ```bash
 # Create feature branch
-git checkout -b feature/collector-implementation
+git checkout -b feature/short-description
 
 # Make changes, then commit
 git add .
-git commit -m "Implement ENTSO-E API collector
-
-- XML parsing for generation_actual endpoint
-- Rate limit handling with exponential backoff
-- Batch validation using Pydantic models"
+git commit -m "Implement baseline improvement"
 
 # Push feature branch
-git push -u origin feature/collector-implementation
+git push -u origin feature/short-description
 
 # Create Pull Request on GitHub
 # (Merge to main after review)
@@ -402,10 +389,10 @@ sudo systemctl start postgresql  # Linux
 
 ## NEXT STEPS AFTER SETUP
 
-1. **Implement Collector** → `src/collector/entso_collector.py`
-2. **Create Database Models** → `src/db/schema.py` with Alembic migrations
-3. **Build API Endpoints** → `src/api/routes/`
-4. **Write Tests** → `tests/unit/` and `tests/integration/`
+1. **Expand ETL scripts** → `scripts/fetch_entsoe_data.py` and scheduler integration
+2. **Create Database Models** → `src/db/schema.py` with migrations if adopted
+3. **Build API Endpoints** → `src/api/` as needed
+4. **Write Tests** → `tests/`
 5. **Docker Build & Test** → `docker build -t cygnet-energy .`
 6. **Push to Registry** → Docker Hub or GitHub Container Registry (Phase 3)
 

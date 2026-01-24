@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "cygnet-energy"
-version = "0.1.0"
+version = "1.0.1"
 description = "European grid intelligence platform - Real-time electricity system data from ENTSO-E"
 authors = ["Yashar Naghdi <he@yasharnaghdi.com>"]
 readme = "README.md"
@@ -19,7 +19,7 @@ requests = "^2.31.0"
 apscheduler = "^3.10.4"
 prometheus-client = "^0.19.0"
 pyyaml = "^6.0"
-python-dotenv = "^1.0.0"
+python-dotenv = "^1.0.1"
 pytz = "^2024.1"
 pandas = "^2.1.0"
 numpy = "^1.26.0"

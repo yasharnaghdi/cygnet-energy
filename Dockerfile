@@ -1,6 +1,10 @@
 # Use official Python runtime as base image
 FROM python:3.11-slim
 
+ARG CYGNET_VERSION=1.0.1
+LABEL org.opencontainers.image.version=$CYGNET_VERSION
+ENV CYGNET_VERSION=$CYGNET_VERSION
+
 # Set working directory
 WORKDIR /app
 

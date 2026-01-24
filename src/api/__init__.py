@@ -9,7 +9,7 @@ from src.db.connection import get_connection
 
 app = FastAPI(
     title="Cygnet Energy API",
-    version="0.1.0",
+    version="1.0.1",
     description="European grid intelligence platform - Real-time electricity data"
 )
 
@@ -26,7 +26,7 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "version": "0.1.0", "timestamp": datetime.utcnow()}
+    return {"status": "ok", "version": "1.0.1", "timestamp": datetime.utcnow()}
 
 
 @app.get("/generation/current")

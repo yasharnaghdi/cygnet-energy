@@ -10,8 +10,8 @@ database:
   host: "localhost"
   port: 5432
   user: "postgres"
-  password: "postgres"
-  name: "cygnet_grid"
+  password: "your_password"
+  name: "cygnet_energy"
   pool_size: 20
   max_overflow: 10
 

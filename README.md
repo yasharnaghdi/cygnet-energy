@@ -4,7 +4,7 @@
 
 **Real-time carbon intelligence for European electricity grids**
 
-A production-grade platform that transforms ENTSO-E transparency data into actionable carbon intelligence, enabling data-driven decisions for energy optimization and sustainability.
+A baseline platform that transforms ENTSO-E transparency data into actionable carbon intelligence, enabling data-driven decisions for energy optimization and sustainability.
 
 ***
 
@@ -24,44 +24,25 @@ CYGNET Energy is a comprehensive grid intelligence platform that:
 - **Quantifies** cost and emissions savings from load shifting strategies
 - **Visualizes** multi-country grid comparisons and carbon trends
 
-**Technical Metrics**
+**Baseline status (v1.0.1)**
 
-Code Quality: 3,080 lines, modular architecture, 90%+ error handling
+This README documents the reproducible baseline scope. Performance and accuracy metrics are not tracked in the baseline and can vary by data coverage, hardware, and API conditions.
 
-Performance: Dashboard load < 2s, database queries < 500ms
+**Deployment notes:**
+- PostgreSQL-backed historical analytics with indexed time series
+- Live API fallback for real-time data (country coverage depends on ENTSO-E)
+- Containerized setup via Docker for consistent runtime environments
 
-Reliability: 30-day uptime > 99.5%, zero runtime crashes (v1.0.0)
+## Baseline Release (v1.0.1)
 
-Data Quality: 99.7% parsing success rate, 500K+ records
+This repository is a reproducible baseline. The main branch is release-ready and non-breaking; experimental prototypes live in `experiments/`.
 
-ML Accuracy: 87% regime classification, 42 gCO₂/kWh forecast RMSE
+Version binding:
+- `VERSION` and `pyproject.toml` define the baseline version.
+- Docker images are labeled with `CYGNET_VERSION` (default `1.0.1`).
+- Screenshots in this README correspond to tag `v1.0.1` and the sample dataset in `data/samples/`.
 
-
-**Model Performance:**
-
-Regime classification accuracy: 87%
-
-24-hour forecast RMSE: 42 gCO₂/kWh
-
-Training time: 15 minutes on MacBook Pro M1
-
-Inference latency: < 100ms per prediction
-
-**Metrics:**
-
-Data ingestion rate: 90 days of hourly data in 45 seconds
-
-Database size: 500K+ records per country
-
-Data quality: 99.7% completeness rate
-
-API reliability: 30-day uptime > 99.5%
-
-**Production deployment capabilities:**
-- PostgreSQL-backed historical analytics for high-frequency queries
-- Live API fallback for real-time data across 7 European countries
-- Scalable architecture supporting both batch processing and real-time requests
-- RESTful API foundation ready for enterprise integrations
+Release policy and tagging details: `RELEASE_POLICY.md`.
 
 ***
 
@@ -84,7 +65,7 @@ CYGNET addresses a critical gap in European energy markets: **grid carbon intens
 **PostgreSQL 14+**
 - Time-series storage for `generation_actual` table
 - Indexed on `time`, `bidding_zone_mrid`, `psr_type`
-- Currently storing 4.3M+ rows for German historical data
+- Baseline dataset is loaded from the sample CSV for DE
 - Schema designed for multi-country expansion
 
 **ENTSO-E Integration**
@@ -137,38 +118,70 @@ Ops: apscheduler, prometheus-client, python-dotenv
 
 ```
 cygnet-energy/
+├── .env.example                 # Environment template
+├── CONTRIBUTING.md              # Development workflow
+├── CHANGELOG.md                 # Baseline release notes
+├── RELEASE_POLICY.md            # Main branch contract + tagging
+├── VERSION                      # Baseline version string
 ├── config/
-│   ├── config.yaml              # Environment-specific settings
-│   └── settings.yaml            # Application configuration
+│   ├── config.yaml              # Local DB settings
+│   ├── config.yaml.example      # Config template
+│   └── settings.yaml            # Service defaults (reference)
 ├── data/samples/
 │   └── time_series_60min_singleindex.csv  # ENTSO-E reference data
+├── experiments/
+│   └── models/                  # Exploratory prototypes (not baseline API)
 ├── scripts/
 │   ├── init_db.py               # Database schema initialization
 │   ├── load_csv_to_db.py        # Bulk CSV ingestion
-│   └── fetch_entsoe_data.py     # Live API data collector
+│   ├── fetch_entsoe_data.py     # Live API data collector
+│   ├── diagnose_data.py         # DB diagnostics
+│   └── smoke_check.py           # Baseline smoke checks
 ├── src/
 │   ├── api/
 │   │   ├── client.py            # ENTSO-E HTTP client
 │   │   └── parser.py            # XML parsing layer
 │   ├── db/
-│   │   ├── connection.py        # PostgreSQL connection pool
+│   │   ├── connection.py        # PostgreSQL connection helper
 │   │   └── schema.py            # DDL definitions
 │   ├── services/
 │   │   └── carbon_service.py    # Core carbon intelligence
 │   ├── models/
 │   │   └── generation.py        # Domain models
 │   └── utils/
-│       ├── config.py            # Configuration loader
+│       ├── config.py            # .env loader
 │       └── zones.py             # Country ↔ bidding zone helpers
 ├── main_app.py                  # Production dashboard
-├── tests/
-│   ├── unit/                    # Service layer tests
-│   └── integration/             # API + DB tests
+├── tests/                       # Test suite
+├── Dockerfile
+├── docker-compose.yml
 ├── pyproject.toml               # Poetry dependency manifest
-└── README.md
+├── README.md
+└── SETUP_GUIDE.md               # More detailed step-by-step setup
 ```
 
 ***
+
+## Reproducibility (Baseline v1.0.1)
+
+Environment assumptions:
+- Python 3.11
+- PostgreSQL 14+
+- Poetry 1.7+ (or Docker 24+ for container runs)
+
+Execution order (local):
+1. `cp .env.example .env` and update `API_TOKEN` plus `DATABASE_URL`.
+2. `cp config/config.yaml.example config/config.yaml` and update DB credentials.
+3. `poetry install`
+4. `poetry run python scripts/init_db.py`
+5. `poetry run python scripts/load_csv_to_db.py --csv-path data/samples/time_series_60min_singleindex.csv`
+6. `poetry run streamlit run main_app.py`
+
+Version and output correspondence:
+- Tag `v1.0.1` matches `VERSION`, `pyproject.toml`, and Docker build arg `CYGNET_VERSION`.
+- Screenshots in this README correspond to the baseline dataset in `data/samples/` plus the DB state created by the steps above.
+- Live API results vary by timestamp and are not reproducible without saved XML inputs.
+- The OPSD time series CSV is not committed; download it and place it at `data/samples/time_series_60min_singleindex.csv`.
 
 ## Deployment Guide
 
@@ -283,17 +296,26 @@ This project ingests ENTSO-E transparency data, stores it in PostgreSQL, and exp
 
 ```text
 cygnet-energy/
+├── .env.example             # Environment template
+├── CONTRIBUTING.md          # Development workflow
+├── CHANGELOG.md             # Baseline release notes
+├── RELEASE_POLICY.md        # Main branch contract + tagging
+├── VERSION                  # Baseline version string
 ├── config/
-│   ├── config.yaml              # App / API / DB settings templates
-│   ├── config.yaml.example
-│   └── settings.yaml
+│   ├── config.yaml          # App / DB settings
+│   ├── config.yaml.example  # Config template
+│   └── settings.yaml        # Service defaults (reference)
 ├── data/
 │   └── samples/
 │       └── time_series_60min_singleindex.csv  # Example ENTSO-E CSV input
+├── experiments/
+│   └── models/              # Exploratory prototypes (not baseline API)
 ├── scripts/
 │   ├── fetch_entsoe_data.py     # Fetch from ENTSO-E and store/process
 │   ├── init_db.py               # Create DB schema
-│   └── load_csv_to_db.py        # Load sample CSV into PostgreSQL
+│   ├── load_csv_to_db.py        # Load sample CSV into PostgreSQL
+│   ├── diagnose_data.py         # DB diagnostics
+│   └── smoke_check.py           # Baseline smoke checks
 ├── src/
 │   ├── api/
 │   │   ├── client.py            # EntsoEAPIClient (HTTP client)
@@ -309,11 +331,7 @@ cygnet-energy/
 │       ├── config.py            # App config loader (env + yaml)
 │       └── zones.py             # Country ↔ bidding zone helpers
 ├── main_app.py                  # Main dashboard
-├── streamlit_app.py             # Legacy Streamlit variant (deprecated)
-├── streamlit_minimal.py         # Legacy/minimal UI (deprecated)
 ├── tests/
-│   ├── unit/
-│   └── integration/
 ├── pyproject.toml               # Poetry config, dependencies, Python 3.11
 ├── README.md                    # (this file)
 └── SETUP_GUIDE.md               # More detailed step-by-step setup (already present)
@@ -340,8 +358,10 @@ cd cygnet-energy
 poetry install
 
 # Configure environment
+cp .env.example .env
 cp config/config.yaml.example config/config.yaml
-# Edit config.yaml with your DB credentials and ENTSO-E API token
+# Edit .env with API_TOKEN and DATABASE_URL
+# Edit config.yaml with your DB credentials
 ```
 
 ### Database Setup
@@ -351,7 +371,7 @@ cp config/config.yaml.example config/config.yaml
 poetry run python scripts/init_db.py
 
 # Load historical data (Germany baseline)
-poetry run python scripts/load_csv_to_db.py
+poetry run python scripts/load_csv_to_db.py --csv-path data/samples/time_series_60min_singleindex.csv
 ```
 
 ### Run Dashboard
@@ -375,7 +395,7 @@ Access at `http://localhost:8501`
 
 **Containerized (Docker)**
 ```bash
-docker build -t cygnet-energy .
+docker build -t cygnet-energy --build-arg CYGNET_VERSION=$(cat VERSION) .
 docker run -p 8501:8501 -e DB_HOST=your-db cygnet-energy
 ```
 
@@ -408,7 +428,7 @@ Source: IPCC 2014 Fifth Assessment Report[3]
 ### API Integration Architecture
 
 **Hybrid Data Strategy:**
-- **Hot path (DE)**: PostgreSQL read (4.3M rows, sub-second queries)
+- **Hot path (DE)**: PostgreSQL read using the baseline CSV-loaded data
 - **Cold path (FR/GB/ES/IT)**: ENTSO-E API with 30s timeout + retry logic
 - **Graceful degradation**: Returns last known good data if API fails
 
@@ -420,15 +440,15 @@ Source: IPCC 2014 Fifth Assessment Report[3]
 
 ## Current Data Coverage
 
-| Country | Bidding Zone | Data Source | Update Frequency | Historical Depth |
-|---------|--------------|-------------|------------------|------------------|
-| DE | 10Y1001A1001A83F | PostgreSQL | Static (CSV) | 30 days |
-| FR | 10YFR-RTE------C | Live API | Real-time | None (ephemeral) |
-| GB | 10YGB----------A | Live API | Real-time | None (ephemeral) |
-| ES | 10YES-REE------0 | Live API | Real-time | None (ephemeral) |
-| IT | 10YIT-GRTN-----B | Live API | Real-time | None (ephemeral) |
+| Country | Bidding Zone | Data Source | Update Frequency | Coverage |
+|---------|--------------|-------------|------------------|----------|
+| DE | 10Y1001A1001A83F | PostgreSQL | Static (CSV) | Sample dataset (varies by file) |
+| FR | 10YFR-RTE------C | Live API | Real-time | Live API only |
+| GB | 10YGB----------A | Live API | Real-time | Live API only |
+| ES | 10YES-REE------0 | Live API | Real-time | Live API only |
+| IT | 10YIT-GRTN-----B | Live API | Real-time | Live API only |
 
-**Roadmap**: Expand PostgreSQL coverage to all zones with scheduled ETL jobs.
+**Roadmap**: Expand PostgreSQL coverage to more zones with scheduled ETL jobs.
 
 ***
 
@@ -465,7 +485,17 @@ Source: IPCC 2014 Fifth Assessment Report[3]
 
 ## Configuration
 
-**Environment Variables** (`.env` or `config/config.yaml`):
+**Baseline configuration files:**
+- `.env` (copy from `.env.example`) for `API_TOKEN` and `DATABASE_URL`.
+- `config/config.yaml` for database credentials and service defaults.
+
+Example `.env`:
+```bash
+API_TOKEN=your_entsoe_api_token
+DATABASE_URL=postgresql://postgres:your_password@localhost:5432/cygnet_energy
+```
+
+Example `config/config.yaml`:
 ```yaml
 database:
   host: localhost
@@ -474,12 +504,11 @@ database:
   user: postgres
   password: your_password
 
-entsoe:
-  api_token: your_entso_api_token
+entso_e:
+  api_key: your_api_key_here
   base_url: https://web-api.tp.entsoe.eu/api
 
-app:
-  debug: false
+service:
   log_level: INFO
 ```
 
@@ -488,17 +517,19 @@ app:
 ## Testing
 
 ```bash
+# Baseline smoke check (ingestion + model + app boot)
+poetry run python scripts/smoke_check.py
+
+# CSV ingestion dry run (no DB writes)
+poetry run python scripts/load_csv_to_db.py --csv-path data/samples/time_series_60min_singleindex.csv --dry-run
+
 # Run full test suite
 poetry run pytest
 
 # With coverage report
 poetry run pytest --cov=src --cov-report=html
 
-# Unit tests only
-poetry run pytest tests/unit/
-
-# Integration tests (requires DB)
-poetry run pytest tests/integration/
+# Note: tests that touch the database require a configured DB.
 ```
 
 **Test configuration** in `pyproject.toml`:[5]
@@ -519,24 +550,16 @@ poetry run pytest tests/integration/
 ***
 ##  Contributing
 
-This is a flagship demonstration project. For production use cases or enterprise deployments, contact the maintainers.
-
-# From project root
-poetry install
-```
-
-This reads `pyproject.toml` and installs all main + dev dependencies, including FastAPI, psycopg2, pandas, numpy, streamlit, plotly, scikit-learn, etc.[1]
+Development workflow and exact commands are in `CONTRIBUTING.md`.
+For production use cases or enterprise deployments, contact the maintainers.
 
 ### 4.3. Environment / Config
 
-Either:
+Baseline setup uses both:
+- `.env` (copy from `.env.example`) for `API_TOKEN` and `DATABASE_URL`
+- `config/config.yaml` for the database connection used by `src/db/connection.py`
 
-- Use environment variables (`.env` + `python-dotenv`), or
-- Edit `config/config.yaml` and/or `settings.yaml` with:
-
-- DB host / port / name (`cygnet_energy`)
-- ENTSO-E API token
-- Debug flags
+`settings.yaml` is a reference template for service defaults and is not required for the baseline run.
 
 The DB name you used so far is `cygnet_energy` and table `generation_actual` is populated for DE from CSV via `load_csv_to_db.py`.
 
@@ -546,7 +569,7 @@ From the project root:
 
 ```bash
 poetry run python scripts/init_db.py
-poetry run python scripts/load_csv_to_db.py
+poetry run python scripts/load_csv_to_db.py --csv-path data/samples/time_series_60min_singleindex.csv
 ```
 
 - `init_db.py` creates the `generation_actual` table (and any related schema) in `cygnet_energy`.
@@ -612,5 +635,4 @@ You should be able to:
 - FastAPI community for web framework
 
 **Last Updated:** January 2025
-**Version:** 0.1.0 (MVP)
-
+**Version:** v1.0.1 baseline

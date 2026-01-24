@@ -25,7 +25,12 @@ PSR_TYPE_MAPPING = {
 }
 
 
-def load_csv_to_db(csv_path: str, bidding_zone: str = "DE", batch_size: int = 10000):
+def load_csv_to_db(
+    csv_path: str,
+    bidding_zone: str = "DE",
+    batch_size: int = 10000,
+    dry_run: bool = False,
+):
     """
     Load CSV data for specified bidding zone into database.
 
@@ -33,6 +38,7 @@ def load_csv_to_db(csv_path: str, bidding_zone: str = "DE", batch_size: int = 10
         csv_path: Path to time_series_60min_singleindex.csv
         bidding_zone: Country code (default: DE for Germany)
         batch_size: Rows per insert batch (default: 10000)
+        dry_run: If True, validate and report without DB writes
     """
     print(f"📊 Loading CSV: {csv_path}")
     print(f"🌍 Filtering for zone: {bidding_zone}")
@@ -41,6 +47,9 @@ def load_csv_to_db(csv_path: str, bidding_zone: str = "DE", batch_size: int = 10
     df = pd.read_csv(csv_path, parse_dates=["utc_timestamp"])
     print(f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns")
 
+    if "utc_timestamp" not in df.columns:
+        raise ValueError("CSV missing required column: utc_timestamp")
+
     # Filter columns for target zone
     zone_prefix = f"{bidding_zone}_"
     generation_cols = [col for col in df.columns if col.startswith(zone_prefix) and "_generation_actual" in col]
@@ -48,6 +57,23 @@ def load_csv_to_db(csv_path: str, bidding_zone: str = "DE", batch_size: int = 10
 
     print(f"📈 Found {len(generation_cols)} generation columns")
     print(f"📉 Found {len(load_cols)} load columns")
+
+    if not generation_cols and not load_cols:
+        raise ValueError(f"No generation/load columns found for zone {bidding_zone}")
+
+    if dry_run:
+        generation_rows = int(df[generation_cols].notna().sum().sum()) if generation_cols else 0
+        load_rows = int(df[load_cols].notna().sum().sum()) if load_cols else 0
+        print("Dry run: no database writes performed")
+        print(f"   Estimated generation rows: {generation_rows:,}")
+        print(f"   Estimated load rows: {load_rows:,}")
+        return {
+            "rows": len(df),
+            "generation_cols": generation_cols,
+            "load_cols": load_cols,
+            "generation_rows": generation_rows,
+            "load_rows": load_rows,
+        }
 
     conn = get_connection()
     cur = conn.cursor()
@@ -134,7 +160,8 @@ if __name__ == "__main__":
     parser.add_argument("--csv-path", required=True, help="Path to CSV file")
     parser.add_argument("--zone", default="DE", help="Bidding zone code (default: DE)")
     parser.add_argument("--batch-size", type=int, default=10000, help="Insert batch size")
+    parser.add_argument("--dry-run", action="store_true", help="Validate CSV without DB writes")
 
     args = parser.parse_args()
 
-    load_csv_to_db(args.csv_path, args.zone, args.batch_size)
+    load_csv_to_db(args.csv_path, args.zone, args.batch_size, args.dry_run)
