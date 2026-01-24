@@ -374,6 +374,115 @@ def compute_renewable_stats_from_df(df):
         "fossil_gen": fossil_gen,
     }
 
+def describe_data_sufficiency(coverage):
+    if not coverage:
+        return "Unknown"
+    min_date = coverage.get("min_date")
+    max_date = coverage.get("max_date")
+    if not min_date or not max_date:
+        return "Sparse (no DB coverage)"
+    span_days = (max_date - min_date).days
+    if span_days >= 180:
+        return f"Dense ({span_days} days in DB)"
+    if span_days >= 30:
+        return f"Moderate ({span_days} days in DB)"
+    return f"Sparse ({span_days} days in DB)"
+
+def build_gap_story(current_data, forecast_df):
+    if not current_data:
+        return "No current measurement available to compare against a baseline."
+    if forecast_df is None or forecast_df.empty:
+        return "No forecast baseline available; interpret this as a point-in-time signal."
+    current = float(current_data.get("co2_intensity", 0.0))
+    avg = float(pd.to_numeric(forecast_df["co2_intensity"], errors="coerce").mean())
+    diff = current - avg
+    direction = "above" if diff > 0 else "below"
+    gap = abs(diff)
+    avg_renewable = None
+    if "renewable_pct" in forecast_df:
+        avg_renewable = float(pd.to_numeric(forecast_df["renewable_pct"], errors="coerce").mean())
+    renewable = current_data.get("renewable_pct")
+    renewable_note = ""
+    if renewable is not None and avg_renewable is not None:
+        renewable_note = (
+            f" Renewable share is {renewable:.1f}% versus a {avg_renewable:.1f}% forecast average."
+        )
+    return (
+        f"Current intensity is {gap:.0f} gCO2/kWh {direction} the next-24h average. "
+        "This is the gap between expected conditions and the live signal."
+        + renewable_note
+    )
+
+def build_generation_gap_story(df):
+    if df is None or df.empty:
+        return "No generation data available to contrast expected vs observed behavior."
+    hourly_total = df.groupby("time")["actual_generation_mw"].sum()
+    peak = float(hourly_total.max())
+    trough = float(hourly_total.min())
+    gap = peak - trough
+    return (
+        f"Observed swing between peak and trough generation is {gap:,.0f} MW. "
+        "This highlights the operational amplitude in the selected window."
+    )
+
+def render_interpretation_panel(
+    context_key,
+    decision_question,
+    what,
+    how,
+    why,
+    model_status,
+    training_regime,
+    data_sufficiency,
+    uncertainty_class,
+    gap_story=None,
+    assumptions=None,
+    responsibility_lines=None,
+):
+    st.markdown("### Interpretation Panel")
+    st.caption("Scientific framing, data lineage, and inference scope.")
+    st.markdown(f"**Analytical objective:** {decision_question}")
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.markdown("**Phenomenon**")
+        st.write(what)
+    with col_b:
+        st.markdown("**Methodology**")
+        st.write(how)
+    with col_c:
+        st.markdown("**Operational relevance**")
+        st.write(why)
+
+    st.markdown("**Model governance**")
+    trust_a, trust_b = st.columns(2)
+    with trust_a:
+        st.write(f"Model status: {model_status}")
+        st.write(f"Training regime: {training_regime}")
+    with trust_b:
+        st.write(f"Data sufficiency: {data_sufficiency}")
+        st.write(f"Uncertainty class: {uncertainty_class}")
+
+    if gap_story:
+        st.markdown("**Observed vs baseline deviation**")
+        st.write(gap_story)
+
+    st.markdown("**Assumptions (toggle to reframe interpretation)**")
+    assumptions = assumptions or []
+    for idx, assumption in enumerate(assumptions):
+        label = assumption.get("label", f"Assumption {idx + 1}")
+        note = assumption.get("impact", "")
+        is_on = st.toggle(label, value=True, key=f"{context_key}_assumption_{idx}")
+        if not is_on and note:
+            st.caption(note)
+
+    st.markdown("**Inference scope**")
+    responsibility_lines = responsibility_lines or []
+    if responsibility_lines:
+        st.markdown("\n".join([f"- {line}" for line in responsibility_lines]))
+
+    st.divider()
+
 
 # ══════════════════════════════════════════════════════════════
 # GLOBAL SIDEBAR (Control Center)
@@ -549,6 +658,48 @@ st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 # ══════════════════════════════════════════════════════════════
 
 def render_overview(country, coverage):
+    data_sufficiency = describe_data_sufficiency(coverage)
+    min_date = coverage.get("min_date") if coverage else None
+    max_date = coverage.get("max_date") if coverage else None
+    gap_story = None
+    if min_date and max_date:
+        gap_story = (
+            f"Stored data spans {min_date} to {max_date}. "
+            "Use this window to anchor comparisons before switching to live ranges."
+        )
+
+    render_interpretation_panel(
+        "overview",
+        decision_question="Module orientation and data coverage context for the selected zone.",
+        what="Available analytical modules plus DB coverage windows for the current zone.",
+        how="Coverage metadata is read from the database and aligned to module availability.",
+        why="Establishes the data scope before any analytical inference.",
+        model_status="Not applicable (navigation layer)",
+        training_regime="N/A",
+        data_sufficiency=data_sufficiency,
+        uncertainty_class="Contextual (depends on downstream modules)",
+        gap_story=gap_story,
+        assumptions=[
+            {
+                "label": "Assumes DB coverage reflects what analysts will use.",
+                "impact": "If this is false, prioritization should follow live data fetches.",
+            },
+            {
+                "label": "Assumes the selected zone is decision-relevant.",
+                "impact": "If the zone is not the decision scope, switch before interpreting.",
+            },
+            {
+                "label": "Assumes baseline scope is sufficient for the question.",
+                "impact": "If not, expand data coverage or add a comparison zone.",
+            },
+        ],
+        responsibility_lines=[
+            "Data indicates available coverage.",
+            "System enumerates module readiness.",
+            "Analyst validates scope and relevance.",
+        ],
+    )
+
     st.markdown("# CYGNET ENERGY")
     st.markdown("## Grid Intelligence and Carbon Optimization Platform")
     st.markdown("---")
@@ -705,6 +856,51 @@ def render_carbon_intelligence(default_country):
         if not country_data:
             st.error("No data available for selected countries")
         else:
+            intensities = [d.get("co2_intensity") for d in country_data.values() if d]
+            gap_story = None
+            if intensities:
+                min_country = min(country_data, key=lambda k: country_data[k]["co2_intensity"])
+                max_country = max(country_data, key=lambda k: country_data[k]["co2_intensity"])
+                min_val = country_data[min_country]["co2_intensity"]
+                max_val = country_data[max_country]["co2_intensity"]
+                gap_story = (
+                    f"Cleanest zone is {min_country} at {min_val:.0f} gCO2/kWh; "
+                    f"dirtiest is {max_country} at {max_val:.0f} gCO2/kWh. "
+                    f"Observed gap is {(max_val - min_val):.0f} gCO2/kWh."
+                )
+
+            render_interpretation_panel(
+                "carbon_compare",
+                decision_question="Cross-zone carbon intensity comparison using the latest available signals.",
+                what="Side-by-side CO2 intensity and renewable share across selected zones.",
+                how="Latest DB records with ENTSO-E live API fallback.",
+                why="Quantifies relative exposure and highlights zones with higher carbon load.",
+                model_status="Operational (descriptive, no forecasting)",
+                training_regime="Latest available measurements",
+                data_sufficiency="Mixed (DB + Live API)",
+                uncertainty_class="Statistical (live API variability)",
+                gap_story=gap_story,
+                assumptions=[
+                    {
+                        "label": "Assumes live API snapshots are representative.",
+                        "impact": "If live data is volatile, prioritize DB-backed zones for decisions.",
+                    },
+                    {
+                        "label": "Assumes zones are comparable without demand normalization.",
+                        "impact": "If scale matters, compare intensity alongside absolute load.",
+                    },
+                    {
+                        "label": "Assumes emission factors are stable across zones.",
+                        "impact": "If factors differ, interpret rankings as directional.",
+                    },
+                ],
+                responsibility_lines=[
+                    "Data indicates current intensity levels by zone.",
+                    "System ranks relative exposure.",
+                    "Analyst validates comparability across zones.",
+                ],
+            )
+
             # Create comparison metrics
             cols = st.columns(len(country_data))
             for idx, (country, data) in enumerate(country_data.items()):
@@ -813,6 +1009,51 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
             current_data, forecast_df, green_data = build_demo_carbon_snapshot(country)
 
         if current_data:
+            if not demo_mode:
+                forecast_df = service.get_24h_forecast(country, hours=24)
+            if forecast_df is None or forecast_df.empty:
+                st.info("Forecast unavailable; showing demo forecast.")
+                _, forecast_df, _ = build_demo_carbon_snapshot(country)
+
+            try:
+                coverage = get_data_coverage(get_db(), country)
+            except Exception:
+                coverage = None
+            data_sufficiency = "Demo (synthetic)" if demo_mode else describe_data_sufficiency(coverage)
+            gap_story = build_gap_story(current_data, forecast_df)
+
+            render_interpretation_panel(
+                "carbon_single",
+                decision_question="Current CO2 intensity and near-term clean window identification.",
+                what="Current intensity, generation mix, and 24-hour outlook with low-carbon windows.",
+                how="Latest DB snapshot with ENTSO-E fallback; forecast uses hourly pattern profiles.",
+                why="Supports operational scheduling and compliance evidence.",
+                model_status="Operational (heuristic forecast)",
+                training_regime="DB last 30 days or live 24h fallback",
+                data_sufficiency=data_sufficiency,
+                uncertainty_class="Structural when DB is sparse; statistical when live",
+                gap_story=gap_story,
+                assumptions=[
+                    {
+                        "label": "Assumes hourly patterns are stable for 24h.",
+                        "impact": "If patterns break, treat green-hour guidance as directional only.",
+                    },
+                    {
+                        "label": "Assumes no cross-border spillover is dominant.",
+                        "impact": "If interconnectors dominate, validate with regional context.",
+                    },
+                    {
+                        "label": "Assumes emission factors are constant.",
+                        "impact": "If factors shift, update policy assumptions before decisions.",
+                    },
+                ],
+                responsibility_lines=[
+                    "Data indicates current carbon intensity.",
+                    "Model suggests low-carbon windows and expected range.",
+                    "Operator validates feasibility before action.",
+                ],
+            )
+
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
@@ -891,12 +1132,7 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
 
             # 24-Hour Carbon Forecast
             st.markdown("### 24-Hour Carbon Forecast")
-
-            if not demo_mode:
-                forecast_df = service.get_24h_forecast(country, hours=24)
-
             if forecast_df is None or forecast_df.empty:
-                st.info("Forecast unavailable; showing demo forecast.")
                 _, forecast_df, _ = build_demo_carbon_snapshot(country)
 
             if forecast_df is not None and not forecast_df.empty:
@@ -1150,13 +1386,47 @@ def render_generation_analytics(country, start_date, end_date):
         renewable_stats = compute_renewable_stats_from_df(df)
         st.caption("Demo data in use for this view.")
 
-    # Metrics row
-    col1, col2, col3, col4 = st.columns(4)
-
+    coverage = get_data_coverage(conn, country)
+    data_sufficiency = "Demo (synthetic)" if demo_mode else describe_data_sufficiency(coverage)
     total_gen = renewable_stats.get('total_gen', 0) or 0
     renewable_gen = renewable_stats.get('renewable_gen', 0) or 0
     fossil_gen = renewable_stats.get('fossil_gen', 0) or 0
     renewable_pct = (renewable_gen / total_gen * 100) if total_gen > 0 else 0
+
+    render_interpretation_panel(
+        "generation",
+        decision_question="Generation mix characterization over the selected time window.",
+        what="Time series by PSR type and renewable share for the selected period.",
+        how="Aggregates DB records for the zone and window (demo data if empty).",
+        why="Supports audits, operational planning, and regulatory reporting.",
+        model_status="Descriptive (no forecasting)",
+        training_regime="Not applicable (direct aggregation)",
+        data_sufficiency=data_sufficiency,
+        uncertainty_class="Data completeness and coverage variability",
+        gap_story=build_generation_gap_story(df),
+        assumptions=[
+            {
+                "label": "Assumes the selected window represents the decision period.",
+                "impact": "If not, widen the window or add a comparison period.",
+            },
+            {
+                "label": "Assumes generation labels map cleanly to renewables.",
+                "impact": "If classification is debated, adjust the renewable mapping.",
+            },
+            {
+                "label": "Assumes no missing intervals in the window.",
+                "impact": "If intervals are missing, interpret totals as directional.",
+            },
+        ],
+        responsibility_lines=[
+            "Data indicates observed generation for the selected window.",
+            "System computes renewable share and mix distribution.",
+            "Analyst validates the reporting context.",
+        ],
+    )
+
+    # Metrics row
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.metric("Total Generation", f"{total_gen:,.0f} MWh")
@@ -1290,6 +1560,45 @@ def render_regimes_and_stress(country):
     st.markdown("# Grid Regimes and Stress Testing")
     st.markdown("AI-powered regime detection and scenario simulation")
     st.divider()
+
+    try:
+        coverage = get_data_coverage(get_db(), country)
+    except Exception:
+        coverage = None
+    data_sufficiency = describe_data_sufficiency(coverage)
+    model_status = "Experimental (models unavailable)" if not REGIME_FEATURES_AVAILABLE else "Experimental (trained models)"
+
+    render_interpretation_panel(
+        "regimes",
+        decision_question="Regime classification and stress-response sensitivity analysis.",
+        what="Regime assignment, driver signals, and counterfactual stress scenarios.",
+        how="Clustering assigns regimes; per-regime models estimate sensitivity to shocks.",
+        why="Quantifies directional risk drivers and scenario impacts.",
+        model_status=model_status,
+        training_regime="Historical regime states; manual refresh cadence",
+        data_sufficiency=data_sufficiency,
+        uncertainty_class="Structural (model assumptions) and data sparsity",
+        gap_story="Compare stored regime with live detector output to surface drift.",
+        assumptions=[
+            {
+                "label": "Assumes regime clusters are stable through time.",
+                "impact": "If regimes drift, rerun clustering before acting on sensitivities.",
+            },
+            {
+                "label": "Assumes linear response within each regime.",
+                "impact": "If shocks are nonlinear, treat deltas as directional only.",
+            },
+            {
+                "label": "Assumes regime_states are up to date.",
+                "impact": "If data is stale, refresh the regime pipeline first.",
+            },
+        ],
+        responsibility_lines=[
+            "Model suggests the current regime and sensitivity direction.",
+            "Data indicates driver inputs used by the model.",
+            "Analyst validates whether to act on scenarios.",
+        ],
+    )
 
     if not REGIME_FEATURES_AVAILABLE:
         st.warning("ML modules not available. Check src/models/trained/ directory.")
@@ -1693,6 +2002,40 @@ def render_data_explorer(country, start_date, end_date):
         render_db_error("Data Explorer", exc)
         return
 
+    coverage = get_data_coverage(conn, country)
+    data_sufficiency = describe_data_sufficiency(coverage)
+    render_interpretation_panel(
+        "data_explorer",
+        decision_question="Data availability and integrity check for the selected zone.",
+        what="Raw record counts and sample rows for the selected window.",
+        how="Direct SQL queries against the historical generation table.",
+        why="Validates data readiness before any analytical claims.",
+        model_status="Raw data (no modeling)",
+        training_regime="Not applicable",
+        data_sufficiency=data_sufficiency,
+        uncertainty_class="Data completeness and query window mismatch",
+        gap_story=None,
+        assumptions=[
+            {
+                "label": "Assumes DB coverage matches the decision window.",
+                "impact": "If coverage is sparse, use live range or fetch fresh data.",
+            },
+            {
+                "label": "Assumes latest data is not delayed.",
+                "impact": "If latency exists, validate timestamps before acting.",
+            },
+            {
+                "label": "Assumes PSR codes map to expected categories.",
+                "impact": "If mappings change, update PSR labels before reporting.",
+            },
+        ],
+        responsibility_lines=[
+            "Data indicates raw availability and sample values.",
+            "System flags gaps or empty windows.",
+            "Analyst confirms data fitness for use.",
+        ],
+    )
+
     if conn is None:
         st.error("Cannot connect to database. Check configuration.")
         st.stop()
@@ -1833,6 +2176,38 @@ def render_data_explorer(country, start_date, end_date):
 def render_technical_info():
     st.markdown("# Technical Documentation")
 
+    render_interpretation_panel(
+        "technical_info",
+        decision_question="System architecture and provenance documentation.",
+        what="Architecture, data pipeline, and technology stack references.",
+        how="Static documentation of ingestion, storage, modeling, and presentation layers.",
+        why="Supports governance review, compliance onboarding, and audit readiness.",
+        model_status="Not applicable (documentation)",
+        training_regime="N/A",
+        data_sufficiency="Reference only",
+        uncertainty_class="None (explanatory)",
+        gap_story="Use this view to trace any chart back to its data source.",
+        assumptions=[
+            {
+                "label": "Assumes documentation matches deployed code.",
+                "impact": "If code changes, update this page to preserve trust.",
+            },
+            {
+                "label": "Assumes external APIs remain stable.",
+                "impact": "If APIs change, update ingestion logic and note impacts.",
+            },
+            {
+                "label": "Assumes model artifacts are versioned.",
+                "impact": "If artifacts drift, document the new provenance.",
+            },
+        ],
+        responsibility_lines=[
+            "Documentation describes system behavior.",
+            "Engineering validates deployment consistency.",
+            "Governance teams confirm compliance alignment.",
+        ],
+    )
+
     tab1, tab2, tab3 = st.tabs(["Architecture", "Data Pipeline", "Tech Stack"])
 
     with tab1:
@@ -1946,6 +2321,39 @@ digraph {
 def render_health_setup(country, coverage):
     st.markdown("# Health & Setup")
     st.markdown("Preflight checks to keep the demo stable and easy to run.")
+
+    data_sufficiency = describe_data_sufficiency(coverage)
+    render_interpretation_panel(
+        "health_setup",
+        decision_question="Operational readiness checks and data coverage verification.",
+        what="Environment, database, and data coverage checks for baseline readiness.",
+        how="Validates API token, DB connectivity, and coverage bounds.",
+        why="Prevents failed demos and clarifies what must be fixed first.",
+        model_status="Operational checks",
+        training_regime="Not applicable",
+        data_sufficiency=data_sufficiency,
+        uncertainty_class="Operational (connectivity and credentials)",
+        gap_story=None,
+        assumptions=[
+            {
+                "label": "Assumes environment variables are configured.",
+                "impact": "If missing, add .env values before using live data.",
+            },
+            {
+                "label": "Assumes DB is reachable from this host.",
+                "impact": "If not, verify Docker or local Postgres status.",
+            },
+            {
+                "label": "Assumes sample CSV is loaded.",
+                "impact": "If not, run load_csv_to_db before demos.",
+            },
+        ],
+        responsibility_lines=[
+            "System reports readiness checks.",
+            "Operators resolve missing configuration.",
+            "Analysts proceed only when checks are green.",
+        ],
+    )
 
     st.subheader("System Checks")
     col1, col2, col3 = st.columns(3)
