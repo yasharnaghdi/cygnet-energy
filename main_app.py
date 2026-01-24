@@ -949,8 +949,9 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
             if green_data and green_data['green_hours']:
                 st.markdown("### Green Hours - When to Use Electricity")
 
-                best = green_data['best_hour']
-                worst = green_data['worst_hours'][0]
+                best = green_data.get('best_hour') or {}
+                worst_hours = green_data.get('worst_hours') or []
+                worst = worst_hours[0] if worst_hours else {}
 
                 col1, col2, col3 = st.columns(3)
 
@@ -958,8 +959,8 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
                     st.markdown(
                         f'<div class="green-card">'
                         f'<h3>BEST HOUR</h3>'
-                        f'<p><b>{best["timestamp"].strftime("%H:%M")}</b></p>'
-                        f'<p>{int(best["co2_intensity"])} gCO₂/kWh<br/>{int(best["renewable_pct"])}% renewable</p>'
+                        f'<p><b>{best.get("timestamp").strftime("%H:%M") if best.get("timestamp") else "N/A"}</b></p>'
+                        f'<p>{int(best.get("co2_intensity", 0))} gCO₂/kWh<br/>{int(best.get("renewable_pct", 0))}% renewable</p>'
                         f'</div>',
                         unsafe_allow_html=True
                     )
@@ -968,8 +969,8 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
                     st.markdown(
                         f'<div class="warning-card">'
                         f'<h3>WORST HOUR</h3>'
-                        f'<p><b>{worst["timestamp"].strftime("%H:%M")}</b></p>'
-                        f'<p>{int(worst["co2_intensity"])} gCO₂/kWh<br/>{int(worst["renewable_pct"])}% renewable</p>'
+                        f'<p><b>{worst.get("timestamp").strftime("%H:%M") if worst.get("timestamp") else "N/A"}</b></p>'
+                        f'<p>{int(worst.get("co2_intensity", 0))} gCO₂/kWh<br/>{int(worst.get("renewable_pct", 0))}% renewable</p>'
                         f'</div>',
                         unsafe_allow_html=True
                     )
@@ -986,7 +987,7 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
 
                 st.info(
                     f"Insight: Between the best and worst hours, CO₂ intensity varies by "
-                    f"{int(worst['co2_intensity'] - best['co2_intensity'])} gCO₂/kWh. "
+                    f"{int(worst.get('co2_intensity', 0) - best.get('co2_intensity', 0))} gCO₂/kWh. "
                     f"For an EV fleet: Shift charging from peak hours (worst) to green hours (best) → "
                     f"30-40% cost reduction, 60-70% emission reduction."
                 )
@@ -1002,18 +1003,19 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
                 "Optimize charging windows for large EV fleets based on carbon and price signals."
             )
 
-            green_data = service.get_green_hours(country, threshold=200)
-
-            if not green_data:
+            optimizer_green_data = green_data
+            if optimizer_green_data is None and not demo_mode:
+                optimizer_green_data = service.get_green_hours(country, threshold=200)
+            if optimizer_green_data is None:
                 st.info("No green-hour optimization data available for this zone yet.")
                 return
 
             # Safely unpack with .get() everywhere to avoid KeyError
-            best = (green_data.get("best_hour") or {})
-            worst_list = green_data.get("worst_hours") or []
+            best = (optimizer_green_data.get("best_hour") or {})
+            worst_list = optimizer_green_data.get("worst_hours") or []
             worst = worst_list[0] if worst_list else {}
 
-            savings = green_data.get("savings_potential") or {}
+            savings = optimizer_green_data.get("savings_potential") or {}
             monthly = savings.get("monthly_savings") or {}
 
             # Safe fallbacks
@@ -1320,19 +1322,19 @@ def render_regimes_and_stress(country):
 
     with st.expander("How the 4 modules work (and how to read them)", expanded=False):
         st.markdown("""
-**Module 1: State Variables**  
+**Module 1: State Variables**
 Turns raw generation into 5 operating gauges: load tightness, RES penetration, net import,
 interconnect saturation, and price volatility. These are the inputs to all regimes.
 
-**Module 2: Regime Detector**  
+**Module 2: Regime Detector**
 Clusters system states into operating modes. Confidence reflects distance to the nearest
 cluster center, not forecast certainty.
 
-**Module 3: Regime Models**  
+**Module 3: Regime Models**
 Fits a separate linear model per regime so sensitivity (coefficients) changes by regime.
 Use R²/MAE and sample size to judge reliability.
 
-**Module 4: Stress Tester**  
+**Module 4: Stress Tester**
 Applies counterfactual shocks to the state variables and shows price impact deltas. Use
 direction and magnitude, not absolute price, as the insight.
 """)
