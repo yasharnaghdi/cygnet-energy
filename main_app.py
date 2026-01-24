@@ -15,6 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import psycopg2.extras
+from streamlit.components.v1 import html as components_html
 
 # Ensure src/ imports work
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -413,6 +414,21 @@ def build_gap_story(current_data, forecast_df):
         + renewable_note
     )
 
+def render_mermaid(diagram, height=320):
+    components_html(
+        f"""
+        <div class="mermaid">
+        {diagram}
+        </div>
+        <script type="module">
+          import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+          mermaid.initialize({{ startOnLoad: true }});
+        </script>
+        """,
+        height=height,
+        scrolling=False,
+    )
+
 def build_generation_gap_story(df):
     if df is None or df.empty:
         return "No generation data available to contrast expected vs observed behavior."
@@ -797,6 +813,59 @@ This platform demonstrates:
             "Suggested flow: run Generation Analytics on the past window, then on the "
             "recent window, and compare shifts in RES penetration and volatility."
         )
+
+    st.markdown("---")
+    st.markdown("### Reporting Snapshot (Auto-Generated)")
+    snapshot_cols = st.columns(4)
+
+    try:
+        conn = get_db()
+        service = CarbonIntensityService(conn)
+    except Exception:
+        service = CarbonIntensityService(None)
+
+    current = service.get_current_intensity(country)
+    forecast = service.get_24h_forecast(country, hours=24) if current else None
+    if current is None:
+        current, forecast, _ = build_demo_carbon_snapshot(country)
+
+    with snapshot_cols[0]:
+        st.metric("Current CO₂", f"{current['co2_intensity']} gCO₂/kWh")
+    with snapshot_cols[1]:
+        st.metric("Renewables", f"{current['renewable_pct']}%")
+    with snapshot_cols[2]:
+        st.metric("Data Source", current.get("data_source", "Unknown"))
+    with snapshot_cols[3]:
+        window_label = "DB window" if min_date and max_date else "Live window"
+        st.metric("Coverage", window_label)
+
+    report_lines = []
+    report_lines.append(f"Zone: {country}")
+    if min_date and max_date:
+        report_lines.append(f"DB coverage: {min_date} to {max_date}")
+    report_lines.append(f"Current intensity: {current['co2_intensity']} gCO2/kWh")
+    report_lines.append(f"Renewable share: {current['renewable_pct']}%")
+
+    if forecast is not None and not forecast.empty:
+        avg_intensity = float(pd.to_numeric(forecast['co2_intensity'], errors='coerce').mean())
+        min_intensity = float(pd.to_numeric(forecast['co2_intensity'], errors='coerce').min())
+        max_intensity = float(pd.to_numeric(forecast['co2_intensity'], errors='coerce').max())
+        report_lines.append(
+            f"Forecast range (24h): {min_intensity:.0f} to {max_intensity:.0f} gCO2/kWh"
+        )
+        report_lines.append(f"Forecast average (24h): {avg_intensity:.0f} gCO2/kWh")
+
+    report_md = "\n".join([f"- {line}" for line in report_lines])
+    st.markdown("**Summary**")
+    st.markdown(report_md)
+    st.caption("Use this snapshot as the executive baseline before drilling into modules.")
+
+    st.download_button(
+        "Download snapshot (Markdown)",
+        data=f"# CYGNET Snapshot\n\n{report_md}\n",
+        file_name=f"cygnet_snapshot_{country}.md",
+        mime="text/markdown",
+    )
 
     st.markdown("### Predictive Modules You Can Use Next")
     st.markdown("""
@@ -1236,7 +1305,8 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
 
             st.markdown("## EV Fleet Charging Optimizer")
             st.markdown(
-                "Optimize charging windows for large EV fleets based on carbon and price signals."
+                "Quantify carbon and cost outcomes by shifting fleet charging between low-"
+                " and high-intensity windows."
             )
 
             optimizer_green_data = green_data
@@ -1246,53 +1316,56 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
                 st.info("No green-hour optimization data available for this zone yet.")
                 return
 
-            # Safely unpack with .get() everywhere to avoid KeyError
             best = (optimizer_green_data.get("best_hour") or {})
             worst_list = optimizer_green_data.get("worst_hours") or []
             worst = worst_list[0] if worst_list else {}
 
-            savings = optimizer_green_data.get("savings_potential") or {}
-            monthly = savings.get("monthly_savings") or {}
-
-            # Safe fallbacks
             best_time = best.get("timestamp")
             best_time_str = best_time.strftime("%H:%M") if best_time else "N/A"
-            best_intensity = int(best.get("co2_intensity", 0))
-            best_renew = int(best.get("renewable_pct", 0))
+            best_intensity = float(best.get("co2_intensity", 0.0))
+            best_renew = float(best.get("renewable_pct", 0.0))
 
             worst_time = worst.get("timestamp")
             worst_time_str = worst_time.strftime("%H:%M") if worst_time else "N/A"
-            worst_intensity = int(worst.get("co2_intensity", 0))
-            worst_renew = int(worst.get("renewable_pct", 0))
+            worst_intensity = float(worst.get("co2_intensity", 0.0))
+            worst_renew = float(worst.get("renewable_pct", 0.0))
 
-            co2_reduction_pct = savings.get("co2_reduction_pct", 0)
-            cost_reduction_pct = savings.get("cost_reduction_pct", 0)
+            col_inputs, col_results = st.columns([1, 2])
+            with col_inputs:
+                fleet_size = st.number_input("Fleet size (vehicles)", min_value=1, value=120, step=5)
+                daily_mwh = st.number_input("Daily energy per vehicle (MWh)", min_value=0.1, value=0.25, step=0.05)
+                price_green = st.number_input("Low-carbon price (€/MWh)", min_value=0.0, value=35.0, step=1.0)
+                price_peak = st.number_input("High-carbon price (€/MWh)", min_value=0.0, value=85.0, step=1.0)
 
-            emissions_desc = monthly.get("emissions_description") or "Carbon savings estimate unavailable."
-            cost_desc = monthly.get("cost_description") or "Cost savings estimate unavailable."
+            daily_total_mwh = fleet_size * daily_mwh
+            monthly_total_mwh = daily_total_mwh * 30
+            price_delta = price_peak - price_green
+            cost_savings_monthly = monthly_total_mwh * price_delta
 
-            col1, col2, col3 = st.columns(3)
+            intensity_delta = max(0.0, worst_intensity - best_intensity)
+            co2_savings_monthly_tons = (intensity_delta * daily_total_mwh * 1000 * 30) / 1e6
 
-            with col1:
-                st.markdown("### Best Charging Window")
-                st.metric("Start time", best_time_str)
-                st.metric("CO₂ intensity", f"{best_intensity} gCO₂/kWh")
-                st.metric("Renewable share", f"{best_renew}%")
+            with col_results:
+                st.markdown("### Window Comparison")
+                result_cols = st.columns(2)
+                with result_cols[0]:
+                    st.metric("Best window", best_time_str)
+                    st.metric("CO₂ intensity", f"{best_intensity:.0f} gCO₂/kWh")
+                    st.metric("Renewable share", f"{best_renew:.0f}%")
+                with result_cols[1]:
+                    st.metric("Worst window", worst_time_str)
+                    st.metric("CO₂ intensity", f"{worst_intensity:.0f} gCO₂/kWh")
+                    st.metric("Renewable share", f"{worst_renew:.0f}%")
 
-            with col2:
-                st.markdown("### Worst Charging Window")
-                st.metric("Start time", worst_time_str)
-                st.metric("CO₂ intensity", f"{worst_intensity} gCO₂/kWh")
-                st.metric("Renewable share", f"{worst_renew}%")
+                st.markdown("### Estimated Monthly Impact")
+                st.metric("Energy shifted", f"{monthly_total_mwh:,.0f} MWh")
+                st.metric("CO₂ avoided", f"{co2_savings_monthly_tons:,.1f} tons")
+                st.metric("Cost savings", f"€{cost_savings_monthly:,.0f}")
 
-            with col3:
-                st.markdown("### Monthly Savings Potential")
-                st.metric("CO₂ reduction", f"{co2_reduction_pct:.0f}%")
-                st.metric("Cost reduction", f"{cost_reduction_pct:.0f}%")
-
-            st.markdown("#### Impact Narrative")
-            st.write(emissions_desc)
-            st.write(cost_desc)
+                st.caption(
+                    "Assumes charging shifts from the highest-intensity hour to the lowest-"
+                    "intensity hour in the current 24h window. Prices are adjustable inputs."
+                )
 
 
 def render_generation_analytics(country, start_date, end_date):
@@ -1523,6 +1596,10 @@ def render_generation_analytics(country, start_date, end_date):
 
     # Bottom: Daily patterns
     st.subheader("Daily Generation Patterns")
+    st.caption(
+        "Hourly averages show diurnal structure for renewable sources. "
+        "Use this to identify the hours where variability is structurally highest."
+    )
 
     # Group by hour
     df['hour'] = pd.to_datetime(df['time']).dt.hour
@@ -1551,6 +1628,36 @@ def render_generation_analytics(country, start_date, end_date):
 
     fig_hourly.update_layout(height=300)
     st.plotly_chart(fig_hourly, use_container_width=True)
+
+    hourly_totals = df.groupby('hour')['actual_generation_mw'].sum().reset_index()
+    hourly_renewable = df[df['psr_type'].isin(renewable_types)].groupby('hour')['actual_generation_mw'].sum().reset_index()
+    merged = hourly_totals.merge(hourly_renewable, on='hour', how='left', suffixes=('_total', '_renewable'))
+    merged['renewable_share_pct'] = (merged['actual_generation_mw_renewable'] / merged['actual_generation_mw_total'] * 100).fillna(0.0)
+
+    top_renewable = merged.sort_values('renewable_share_pct', ascending=False).head(3)
+    top_total = merged.sort_values('actual_generation_mw_total', ascending=False).head(3)
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Peak renewable share hours**")
+        st.dataframe(
+            top_renewable[['hour', 'renewable_share_pct']].rename(columns={
+                'hour': 'Hour',
+                'renewable_share_pct': 'Renewable share (%)'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+    with col_b:
+        st.markdown("**Peak total generation hours**")
+        st.dataframe(
+            top_total[['hour', 'actual_generation_mw_total']].rename(columns={
+                'hour': 'Hour',
+                'actual_generation_mw_total': 'Total generation (MW)'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
 
     source_label = "Demo (synthetic)" if demo_mode else "ENTSO-E"
     st.caption(f"Data Source: {source_label} | Zone: {country} | Rows: {len(df):,}")
@@ -2231,6 +2338,20 @@ digraph {
   entsoe -> api -> db -> svc -> ml -> ui;
 }
 """)
+        st.markdown("### Architecture (Mermaid)")
+        try:
+            render_mermaid(
+                """
+                flowchart LR
+                  A[ENTSO-E API] --> B[API Client & Parser]
+                  B --> C[(PostgreSQL)]
+                  C --> D[Service Layer]
+                  D --> E[ML Modules]
+                  E --> F[Streamlit UI]
+                """
+            )
+        except Exception:
+            st.code("flowchart LR: ENTSO-E API -> Parser -> PostgreSQL -> Service -> ML -> UI")
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -2279,6 +2400,25 @@ digraph {
 - Interactive Plotly visualizations
 - Responsive design
 """)
+        st.markdown("### Pipeline (Mermaid)")
+        try:
+            render_mermaid(
+                """
+                sequenceDiagram
+                  participant API as ENTSO-E API
+                  participant Parser as XML Parser
+                  participant DB as PostgreSQL
+                  participant Service as Service Layer
+                  participant UI as Dashboard
+                  API->>Parser: Fetch XML
+                  Parser->>DB: Normalize & store
+                  DB->>Service: Query slices
+                  Service->>UI: Emit metrics
+                """,
+                height=340,
+            )
+        except Exception:
+            st.code("sequence: ENTSO-E -> Parser -> DB -> Service -> UI")
 
     with tab3:
         st.markdown("### Technology Stack")
