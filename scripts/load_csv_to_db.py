@@ -1,15 +1,11 @@
 #!/usr/bin/env python
 """Load Open Power System Data CSV into PostgreSQL."""
-import pandas as pd
-import psycopg2.extras
+import csv
 from pathlib import Path
 import sys
-from datetime import datetime
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from src.db.connection import get_connection
 
 
 PSR_TYPE_MAPPING = {
@@ -43,6 +39,56 @@ def load_csv_to_db(
     print(f"📊 Loading CSV: {csv_path}")
     print(f"🌍 Filtering for zone: {bidding_zone}")
 
+    zone_prefix = f"{bidding_zone}_"
+
+    if dry_run:
+        with open(csv_path, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "utc_timestamp" not in reader.fieldnames:
+                raise ValueError("CSV missing required column: utc_timestamp")
+
+            generation_cols = [
+                col for col in reader.fieldnames
+                if col.startswith(zone_prefix) and "_generation_actual" in col
+            ]
+            load_cols = [
+                col for col in reader.fieldnames
+                if col.startswith(zone_prefix) and "_load_actual" in col
+            ]
+
+            if not generation_cols and not load_cols:
+                raise ValueError(f"No generation/load columns found for zone {bidding_zone}")
+
+            generation_rows = 0
+            load_rows = 0
+            total_rows = 0
+            for row in reader:
+                total_rows += 1
+                for col in generation_cols:
+                    if row.get(col):
+                        generation_rows += 1
+                for col in load_cols:
+                    if row.get(col):
+                        load_rows += 1
+
+        print(f"✅ Loaded {total_rows:,} rows, {len(reader.fieldnames)} columns")
+        print(f"📈 Found {len(generation_cols)} generation columns")
+        print(f"📉 Found {len(load_cols)} load columns")
+        print("Dry run: no database writes performed")
+        print(f"   Estimated generation rows: {generation_rows:,}")
+        print(f"   Estimated load rows: {load_rows:,}")
+        return {
+            "rows": total_rows,
+            "generation_cols": generation_cols,
+            "load_cols": load_cols,
+            "generation_rows": generation_rows,
+            "load_rows": load_rows,
+        }
+
+    import pandas as pd
+    import psycopg2.extras
+    from src.db.connection import get_connection
+
     # Read CSV
     df = pd.read_csv(csv_path, parse_dates=["utc_timestamp"])
     print(f"✅ Loaded {len(df):,} rows, {len(df.columns)} columns")
@@ -51,7 +97,6 @@ def load_csv_to_db(
         raise ValueError("CSV missing required column: utc_timestamp")
 
     # Filter columns for target zone
-    zone_prefix = f"{bidding_zone}_"
     generation_cols = [col for col in df.columns if col.startswith(zone_prefix) and "_generation_actual" in col]
     load_cols = [col for col in df.columns if col.startswith(zone_prefix) and "_load_actual" in col]
 
@@ -60,20 +105,6 @@ def load_csv_to_db(
 
     if not generation_cols and not load_cols:
         raise ValueError(f"No generation/load columns found for zone {bidding_zone}")
-
-    if dry_run:
-        generation_rows = int(df[generation_cols].notna().sum().sum()) if generation_cols else 0
-        load_rows = int(df[load_cols].notna().sum().sum()) if load_cols else 0
-        print("Dry run: no database writes performed")
-        print(f"   Estimated generation rows: {generation_rows:,}")
-        print(f"   Estimated load rows: {load_rows:,}")
-        return {
-            "rows": len(df),
-            "generation_cols": generation_cols,
-            "load_cols": load_cols,
-            "generation_rows": generation_rows,
-            "load_rows": load_rows,
-        }
 
     conn = get_connection()
     cur = conn.cursor()
