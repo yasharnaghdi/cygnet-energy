@@ -161,7 +161,12 @@ class RegimeResponse(BaseModel):
 
 
 class TokenData(BaseModel):
-    api_key: str
+    sub: str
+    email: Optional[str] = None
+    roles: list[str] = Field(default_factory=list)
+    scopes: list[str] = Field(default_factory=list)
+    issuer: Optional[str] = None
+    audience: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):

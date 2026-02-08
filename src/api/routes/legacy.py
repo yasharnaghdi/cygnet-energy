@@ -4,11 +4,12 @@ from datetime import datetime
 from typing import Optional
 
 import psycopg2.extras
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from src.api.middleware.auth import verify_token
 from src.db.connection import get_connection
 
-router = APIRouter(tags=["Legacy"])
+router = APIRouter(tags=["Legacy"], dependencies=[Depends(verify_token)])
 
 
 @router.get("/health")
@@ -89,7 +90,7 @@ async def get_generation_history(
             SELECT time, psr_type, actual_generation_mw, quality_code
             FROM generation_actual
             WHERE bidding_zone_mrid = %s
-              AND time >= NOW() - INTERVAL '%s hours'
+              AND time >= NOW() - (%s * INTERVAL '1 hour')
             ORDER BY time DESC, psr_type
         """
         params = (bidding_zone, hours)
@@ -129,7 +130,7 @@ async def get_renewable_fraction(bidding_zone: str = "DE", hours: int = 24):
                 SUM(actual_generation_mw) as total_gen
             FROM generation_actual
             WHERE bidding_zone_mrid = %s
-              AND time >= NOW() - INTERVAL '%s hours'
+              AND time >= NOW() - (%s * INTERVAL '1 hour')
               AND quality_code = 'A'
         )
         SELECT

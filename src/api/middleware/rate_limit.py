@@ -13,9 +13,15 @@ from src.api.models.schemas import ErrorResponse
 
 
 def _rate_limit_key(request: Request) -> str:
+    # Prefer stable subject from validated JWT so limits follow the user identity.
+    sub = getattr(request.state, "token_sub", None)
+    if sub:
+        return f"sub:{sub}"
+
     api_key = request.headers.get("X-API-Key")
     if api_key:
         return api_key
+
     return get_remote_address(request)
 
 

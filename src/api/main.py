@@ -10,7 +10,8 @@ from slowapi.errors import RateLimitExceeded
 
 from src.api.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from src.api.models.schemas import ErrorResponse
-from src.api.routes import carbon_intensity, generation, legacy, optimization, regimes
+from src.api.routes import carbon_intensity, generation, legacy
+from src.db.connection import get_connection
 
 app = FastAPI(
     title="Cygnet Energy API",
@@ -87,6 +88,36 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 app.include_router(legacy.router)
 app.include_router(carbon_intensity.router)
-app.include_router(optimization.router)
 app.include_router(generation.router)
-app.include_router(regimes.router)
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz() -> dict[str, str]:
+    """Liveness probe that requires only the app process to be up."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz", include_in_schema=False)
+async def readyz() -> dict[str, str]:
+    """
+    Readiness probe that ensures core dependencies are reachable.
+    Currently checks Postgres connectivity.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1;")
+        cursor.fetchone()
+    except Exception as exc:  # pragma: no cover - defensive readiness guard
+        raise HTTPException(
+            status_code=503,
+            detail=f"Dependency check failed: {exc}",
+        ) from exc
+    finally:
+        try:
+            cursor.close()
+            conn.close()
+        except Exception:
+            pass
+
+    return {"status": "ready"}
