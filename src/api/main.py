@@ -10,7 +10,7 @@ from slowapi.errors import RateLimitExceeded
 
 from src.api.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from src.api.models.schemas import ErrorResponse
-from src.api.routes import carbon_intensity, generation, legacy
+from src.api.routes import indicators, legacy
 from src.db.connection import get_connection
 
 app = FastAPI(
@@ -87,8 +87,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 app.include_router(legacy.router)
-app.include_router(carbon_intensity.router)
-app.include_router(generation.router)
+app.include_router(indicators.router)
 
 
 @app.get("/healthz", include_in_schema=False)

@@ -8,21 +8,18 @@ Formula:
     CO2_Intensity = Σ(Generation_MW_i × Emission_Factor_i) / Total_Generation_MW
 """
 
-import pandas as pd
-import numpy as np
+from typing import TYPE_CHECKING
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
-from src.api.client import EntsoEAPIClient
-from src.api.parser import EntsoEXMLParser
 from src.utils.zones import get_zone_keys
-import psycopg2
-from psycopg2 import sql
 import logging
 
 
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    import pandas as pd
 
 class CarbonIntensityService:
     """Calculate and track CO2 intensity of electricity grids"""
@@ -76,7 +73,7 @@ class CarbonIntensityService:
         Initialize with database connection
 
         Args:
-            db_connection: psycopg2 connection object
+            db_connection: database connection object
         """
         self.conn = db_connection
 
@@ -85,6 +82,9 @@ class CarbonIntensityService:
 
         try:
             logger.info(f"Fetching live data for {country} from API...")
+
+            from src.api.client import EntsoEAPIClient
+            from src.api.parser import EntsoEXMLParser
 
             api_client = EntsoEAPIClient()
             end_date = datetime.now()
@@ -187,7 +187,7 @@ class CarbonIntensityService:
             logger.error(f"Error getting intensity: {e}")
             return self._fetch_from_api(country)
 
-    def get_24h_forecast(self, country: str, hours: int = 24) -> Optional[pd.DataFrame]:
+    def get_24h_forecast(self, country: str, hours: int = 24) -> Optional["pd.DataFrame"]:
         """
         Get CO2 intensity forecast for next N hours (based on historical patterns)
 
@@ -223,6 +223,8 @@ class CarbonIntensityService:
                 return self._forecast_from_live_api(country, hours)
 
             # Build forecast
+            import pandas as pd
+
             forecast_data = []
             now = datetime.now().replace(minute=0, second=0, microsecond=0)
 
@@ -277,6 +279,8 @@ class CarbonIntensityService:
                 }
             }
         """
+        import pandas as pd
+
         forecast_df = self.get_24h_forecast(country)
 
         if forecast_df is None or forecast_df.empty:
@@ -320,9 +324,12 @@ class CarbonIntensityService:
             }
         }
 
-    def _forecast_from_live_api(self, country: str, hours: int = 24) -> Optional[pd.DataFrame]:
+    def _forecast_from_live_api(self, country: str, hours: int = 24) -> Optional["pd.DataFrame"]:
         """Fallback: build a near-term profile from the last 24h of live API data."""
         try:
+            from src.api.client import EntsoEAPIClient
+            from src.api.parser import EntsoEXMLParser
+
             api_client = EntsoEAPIClient()
             end_date = datetime.now()
             start_date = end_date - timedelta(hours=24)
@@ -334,6 +341,8 @@ class CarbonIntensityService:
             df = EntsoEXMLParser.parse_generation_xml(xml_response)
             if df is None or df.empty:
                 return None
+
+            import pandas as pd
 
             df['hour'] = pd.to_datetime(df['time']).dt.hour
             hourly = (

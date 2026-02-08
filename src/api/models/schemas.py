@@ -131,6 +131,39 @@ class GenerationMixResponse(BaseModel):
     }
 
 
+class IndicatorQuery(BaseModel):
+    zone: CountryCode = Field(default=CountryCode.DE)
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    limit: int = Field(default=48, ge=1, le=1000)
+
+
+class IndicatorPackageResponse(BaseModel):
+    timestamp_utc: datetime
+    region_type: str
+    region_id: str
+    granularity: str
+    carbon_intensity: float
+    fossil_share: float
+    volatility: Optional[float]
+    clean_window: bool
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "timestamp_utc": "2024-01-01T12:00:00Z",
+                "region_type": "zone",
+                "region_id": "DE",
+                "granularity": "hour",
+                "carbon_intensity": 185.4,
+                "fossil_share": 42.8,
+                "volatility": 12.5,
+                "clean_window": True,
+            }
+        }
+    }
+
+
 class RegimeQuery(BaseModel):
     zone: CountryCode = Field(default=CountryCode.DE)
     date_range: int = Field(default=1, ge=1, le=90)
