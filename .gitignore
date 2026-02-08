@@ -8,6 +8,7 @@ venv/
 .env.local
 !.env.example
 config/secrets.yaml
+config/certs/
 logs/
 *.log
 .DS_Store

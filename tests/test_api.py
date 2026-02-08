@@ -17,9 +17,9 @@ class TestEntsoEAPI:
 
     def test_bidding_zone_mapping(self, api_client):
         """Test country to bidding zone mapping"""
-        assert api_client.BIDDING_ZONES["DE"] == "10YDE-LHM------7"
+        assert api_client.BIDDING_ZONES["DE"] == "10Y1001A1001A83F"
         assert api_client.BIDDING_ZONES["FR"] == "10YFR-RTE------C"
-        assert api_client.BIDDING_ZONES["GB"] == "10YGB-NGET-----0"
+        assert api_client.BIDDING_ZONES["GB"] == "10YGB----------A"
 
     @patch('requests.get')
     def test_get_actual_generation_success(self, mock_get, api_client):
