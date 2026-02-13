@@ -15,7 +15,8 @@ def _load_env_file(env_path: Path) -> None:
 _load_env_file(Path(__file__).resolve().parent.parent.parent / ".env")
 
 # ENTSO-E API
-API_TOKEN = os.getenv("API_TOKEN")
+# Keep backward compatibility with both env var names.
+API_TOKEN = os.getenv("API_TOKEN") or os.getenv("ENTSOE_API_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://web-api.tp.entsoe.eu/api")
 API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
 

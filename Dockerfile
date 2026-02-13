@@ -12,22 +12,21 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
-    software-properties-common \
     git \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files
-COPY pyproject.toml poetry.lock ./
+# Copy dependency manifest
+COPY pyproject.toml ./
 
-# Install Poetry
-RUN pip install --no-cache-dir poetry
+# Install Poetry v1 (compatible with current lock format)
+RUN pip install --no-cache-dir "poetry<2.0.0"
 
 # Configure Poetry to not create virtual environments (we're in a container)
 RUN poetry config virtualenvs.create false
 
 # Install Python dependencies
-RUN poetry install --no-dev --no-interaction --no-ansi
+RUN poetry install --only main --no-interaction --no-ansi
 
 # Copy application code
 COPY . .
@@ -38,5 +37,5 @@ EXPOSE 8501
 # Health check
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
 
-# Run Streamlit
-ENTRYPOINT ["streamlit", "run", "main_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Default command (can be overridden by docker-compose service commands)
+CMD ["streamlit", "run", "main_app.py", "--server.port=8501", "--server.address=0.0.0.0"]

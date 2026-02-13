@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import psycopg2.extras
+import requests
+import yaml
 from streamlit.components.v1 import html as components_html
 
 # Ensure src/ imports work
@@ -185,6 +187,147 @@ def get_data_coverage(_conn, zone):
         "max_date": max_time.date() if pd.notnull(max_time) else None,
         "monthly": monthly
     }
+
+
+ENTSOE_ZONES = ["DE", "FR", "GB", "ES", "IT"]
+
+
+@st.cache_data(ttl=600)
+def get_config_eia_states():
+    cfg_path = Path(__file__).resolve().parent / "config" / "config.yaml"
+    if not cfg_path.exists():
+        return []
+    try:
+        with cfg_path.open("r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        return []
+
+    states = cfg.get("eia", {}).get("states", [])
+    normalized = []
+    for state in states:
+        value = str(state).strip().upper()
+        if value and value not in {"ALL", "ALL_STATES"}:
+            normalized.append(value)
+    return sorted(set(normalized))
+
+
+@st.cache_data(ttl=60)
+def get_regions_from_api(source):
+    api_base = (
+        os.getenv("CYGNET_API_URL")
+        or os.getenv("API_BASE_URL")
+        or "http://localhost:8000"
+    ).rstrip("/")
+    try:
+        resp = requests.get(
+            f"{api_base}/v1/regions",
+            params={"source": source},
+            timeout=2,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        regions = []
+        for row in payload:
+            region_id = row.get("region_id")
+            if region_id:
+                regions.append(str(region_id))
+        return regions
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=600)
+def get_eia_states_from_db(_conn):
+    if _conn is None:
+        return []
+    df = pd.read_sql_query(
+        """
+        SELECT DISTINCT region_id
+        FROM canonical_metrics
+        WHERE source = 'EIA'
+          AND dataset = 'electricity/retail-sales'
+          AND metric_name = 'retail_price'
+        ORDER BY region_id
+        """,
+        _conn,
+    )
+    return df["region_id"].tolist() if not df.empty else []
+
+
+@st.cache_data(ttl=600)
+def get_eia_data_coverage(_conn, state):
+    if _conn is None:
+        return {"min_date": None, "max_date": None, "monthly": pd.DataFrame()}
+
+    bounds = pd.read_sql_query(
+        """
+        SELECT MIN(timestamp_utc) AS min_time, MAX(timestamp_utc) AS max_time
+        FROM canonical_metrics
+        WHERE source = 'EIA'
+          AND dataset = 'electricity/retail-sales'
+          AND metric_name = 'retail_price'
+          AND region_id = %s
+        """,
+        _conn,
+        params=(state,),
+    )
+    min_time = bounds["min_time"].iloc[0]
+    max_time = bounds["max_time"].iloc[0]
+
+    monthly = pd.read_sql_query(
+        """
+        SELECT date_trunc('month', timestamp_utc) AS month, COUNT(*) AS rows
+        FROM canonical_metrics
+        WHERE source = 'EIA'
+          AND dataset = 'electricity/retail-sales'
+          AND metric_name = 'retail_price'
+          AND region_id = %s
+        GROUP BY 1
+        ORDER BY 1
+        """,
+        _conn,
+        params=(state,),
+    )
+    return {
+        "min_date": min_time.date() if pd.notnull(min_time) else None,
+        "max_date": max_time.date() if pd.notnull(max_time) else None,
+        "monthly": monthly,
+    }
+
+
+@st.cache_data(ttl=600)
+def get_eia_ingestion_overview(_conn):
+    if _conn is None:
+        return {"ingested_states": 0, "total_rows": 0}
+    df = pd.read_sql_query(
+        """
+        SELECT
+            COUNT(DISTINCT region_id) AS ingested_states,
+            COUNT(*) AS total_rows
+        FROM canonical_metrics
+        WHERE source = 'EIA'
+          AND dataset = 'electricity/retail-sales'
+          AND metric_name = 'retail_price'
+        """,
+        _conn,
+    )
+    if df.empty:
+        return {"ingested_states": 0, "total_rows": 0}
+    return {
+        "ingested_states": int(df["ingested_states"].iloc[0] or 0),
+        "total_rows": int(df["total_rows"].iloc[0] or 0),
+    }
+
+
+@st.cache_data(ttl=3600)
+def get_eia_total_states_from_facet():
+    try:
+        from src.services.eia_adapter import EIAAdapter
+
+        return len(EIAAdapter().fetch_retail_state_ids())
+    except Exception:
+        return None
 
 def fetch_generation_data(conn, country, start_dt, end_dt):
     api_client = EntsoEAPIClient()
@@ -509,19 +652,62 @@ st.sidebar.divider()
 
 st.sidebar.header("Global Context")
 
-# Global Country Selector
-global_country = st.sidebar.selectbox(
-    "Select Grid Zone",
-    ["DE", "FR", "GB", "ES", "IT"],
+global_source_label = st.sidebar.radio(
+    "Data Source",
+    ["ENTSO-E (countries/zones)", "EIA (US states)"],
     index=0,
-    help="This selection applies to all tabs"
+    key="global_source",
 )
+is_eia_source = global_source_label.startswith("EIA")
 
-# Data coverage (for guidance and defaults)
 try:
-    coverage = get_data_coverage(get_db(), global_country)
+    sidebar_conn = get_db()
 except Exception:
-    coverage = {"min_date": None, "max_date": None, "monthly": pd.DataFrame()}
+    sidebar_conn = None
+
+if is_eia_source:
+    state_options = get_regions_from_api("eia")
+    if sidebar_conn is not None:
+        try:
+            if not state_options:
+                state_options = get_eia_states_from_db(sidebar_conn)
+        except Exception:
+            state_options = []
+    if not state_options:
+        state_options = get_config_eia_states()
+    if not state_options:
+        state_options = ["CA"]
+    global_region = st.sidebar.selectbox(
+        "Select US State",
+        state_options,
+        index=0,
+        key="global_state_eia",
+        help="EIA retail prices are state-level metrics.",
+    )
+    global_country = global_region
+    try:
+        coverage = get_eia_data_coverage(sidebar_conn, global_region)
+    except Exception:
+        coverage = {"min_date": None, "max_date": None, "monthly": pd.DataFrame()}
+    eia_overview = get_eia_ingestion_overview(sidebar_conn) if sidebar_conn is not None else {
+        "ingested_states": 0,
+        "total_rows": 0,
+    }
+else:
+    zone_options = get_regions_from_api("entsoe") or ENTSOE_ZONES
+    global_region = st.sidebar.selectbox(
+        "Select Grid Zone",
+        zone_options,
+        index=0,
+        key="global_zone_entsoe",
+        help="This selection applies to ENTSO-E analytical tabs.",
+    )
+    global_country = global_region
+    try:
+        coverage = get_data_coverage(sidebar_conn, global_country)
+    except Exception:
+        coverage = {"min_date": None, "max_date": None, "monthly": pd.DataFrame()}
+    eia_overview = {"ingested_states": 0, "total_rows": 0}
 
 # Global Date Range
 st.sidebar.subheader("Time Window")
@@ -548,13 +734,17 @@ def on_live_range_toggle():
         st.session_state["global_end"] = max_date
         st.session_state["global_start"] = max(min_date, max_date - timedelta(days=30))
 
-live_range = st.sidebar.checkbox(
-    "Enable live range (fetch on demand)",
-    value=False,
-    key="live_range",
-    on_change=on_live_range_toggle,
-    help="Allow any date range; data will be fetched from ENTSO-E when needed."
-)
+if not is_eia_source:
+    live_range = st.sidebar.checkbox(
+        "Enable live range (fetch on demand)",
+        value=False,
+        key="live_range",
+        on_change=on_live_range_toggle,
+        help="Allow any date range; data will be fetched from ENTSO-E when needed.",
+    )
+else:
+    live_range = False
+    st.sidebar.caption("EIA uses historical monthly records from canonical_metrics.")
 
 # Ensure defaults sit inside the allowed date bounds before widget instantiation
 if live_range:
@@ -663,9 +853,20 @@ global_end = st.sidebar.date_input(
 st.sidebar.divider()
 st.sidebar.info(
     f"**Active Context**\n\n"
-    f"Zone: {global_country}\n\n"
+    f"Source: {'EIA' if is_eia_source else 'ENTSO-E'}\n\n"
+    f"Region: {global_region}\n\n"
     f"Period: {(global_end - global_start).days} days"
 )
+if is_eia_source:
+    total_states = get_eia_total_states_from_facet()
+    ingested_states = eia_overview.get("ingested_states", 0)
+    if total_states:
+        coverage_pct = ingested_states / total_states * 100.0
+        st.sidebar.caption(
+            f"EIA state coverage: {ingested_states}/{total_states} ({coverage_pct:.1f}%)"
+        )
+    else:
+        st.sidebar.caption(f"EIA ingested states: {ingested_states}")
 st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 
@@ -873,6 +1074,50 @@ This platform demonstrates:
 - **Predictive Response Curve**: shows price sensitivity across a shock range.
 - **Regime Coefficients**: explain which features drive outcomes per regime.
 """)
+
+
+def render_eia_overview(state, coverage, eia_overview):
+    st.markdown("# EIA Overview")
+    st.markdown("US state-level retail electricity prices ingested into `canonical_metrics`.")
+
+    monthly = coverage.get("monthly") if coverage else pd.DataFrame()
+    min_date = coverage.get("min_date") if coverage else None
+    max_date = coverage.get("max_date") if coverage else None
+
+    total_states = get_eia_total_states_from_facet()
+    ingested_states = eia_overview.get("ingested_states", 0)
+    total_rows = eia_overview.get("total_rows", 0)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Selected State", state)
+    with col2:
+        st.metric("Ingested EIA States", f"{ingested_states}")
+    with col3:
+        if total_states:
+            st.metric("Coverage", f"{(ingested_states / total_states) * 100:.1f}%")
+        else:
+            st.metric("Coverage", "Unknown")
+
+    if min_date and max_date:
+        st.caption(f"State coverage window: {min_date} → {max_date}")
+    st.caption(f"Total EIA retail rows in DB: {total_rows:,}")
+
+    if monthly is not None and not monthly.empty:
+        fig = px.bar(
+            monthly,
+            x="month",
+            y="rows",
+            title=f"{state} monthly EIA rows",
+            labels={"month": "Month", "rows": "Rows"},
+        )
+        fig.update_layout(height=320)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No monthly EIA rows found for this state and period.")
+
+    st.markdown("### Next Action")
+    st.markdown("Use the `EIA Retail Prices` tab to inspect price trends and sample rows.")
 
 
 def render_carbon_intelligence(default_country):
@@ -2280,6 +2525,105 @@ def render_data_explorer(country, start_date, end_date):
         st.error(f"Query error: {e}")
 
 
+def render_eia_retail_prices(default_state=None, start_date=None, end_date=None):
+    st.markdown("# EIA Retail Prices")
+    st.markdown("US state-level retail electricity prices from `canonical_metrics`.")
+
+    try:
+        conn = get_db()
+    except Exception as exc:
+        render_db_error("EIA Retail Prices", exc)
+        return
+
+    if conn is None:
+        st.error("Cannot connect to database. Check configuration.")
+        return
+
+    try:
+        states = get_eia_states_from_db(conn)
+    except Exception as exc:
+        st.error(f"Failed to load EIA state list: {exc}")
+        return
+
+    if not states:
+        st.warning("No EIA retail rows found in canonical_metrics.")
+        st.caption("Run `poetry run python scripts/fetch_eia_data.py --from-config` first.")
+        return
+
+    default_index = 0
+    if default_state and default_state in states:
+        default_index = states.index(default_state)
+    state = st.selectbox("State", states, index=default_index, key="eia_state")
+
+    if start_date is not None:
+        start_default = start_date.strftime("%Y-%m")
+    else:
+        start_default = "2024-01"
+    if end_date is not None:
+        end_default = end_date.strftime("%Y-%m")
+    else:
+        end_default = "2025-12"
+
+    col_start, col_end = st.columns(2)
+    with col_start:
+        start_month = st.text_input("Start month (YYYY-MM)", value=start_default, key="eia_start")
+    with col_end:
+        end_month = st.text_input("End month (YYYY-MM)", value=end_default, key="eia_end")
+
+    try:
+        eia_df = pd.read_sql_query(
+            """
+            SELECT
+                timestamp_utc AS month,
+                metric_value AS retail_price_usd_mwh,
+                facets
+            FROM canonical_metrics
+            WHERE source = 'EIA'
+              AND dataset = 'electricity/retail-sales'
+              AND metric_name = 'retail_price'
+              AND region_id = %s
+              AND to_char(timestamp_utc, 'YYYY-MM') >= %s
+              AND to_char(timestamp_utc, 'YYYY-MM') <= %s
+            ORDER BY timestamp_utc
+            """,
+            conn,
+            params=(state, start_month, end_month),
+        )
+    except Exception as exc:
+        st.error(f"Failed to query EIA rows: {exc}")
+        return
+
+    if eia_df.empty:
+        st.warning("No rows in selected filter.")
+        return
+
+    total_states = get_eia_total_states_from_facet()
+    ingested_states = get_eia_ingestion_overview(conn).get("ingested_states", 0)
+    latest_price = float(eia_df["retail_price_usd_mwh"].iloc[-1])
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric("Latest Retail Price", f"{latest_price:.2f} USD/MWh")
+    with col_b:
+        st.metric("Rows in Filter", f"{len(eia_df):,}")
+    with col_c:
+        if total_states:
+            st.metric("State Coverage", f"{(ingested_states / total_states) * 100:.1f}%")
+        else:
+            st.metric("Ingested States", f"{ingested_states}")
+
+    fig = px.line(
+        eia_df,
+        x="month",
+        y="retail_price_usd_mwh",
+        title=f"EIA Retail Price Trend ({state})",
+        labels={"retail_price_usd_mwh": "USD/MWh", "month": "Month"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### Sample Rows")
+    st.dataframe(eia_df.tail(100), use_container_width=True, height=360)
+
+
 def render_technical_info():
     st.markdown("# Technical Documentation")
 
@@ -2496,17 +2840,25 @@ def render_health_setup(country, coverage):
     )
 
     st.subheader("System Checks")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
-    api_token = os.getenv("API_TOKEN")
+    api_token = os.getenv("API_TOKEN") or os.getenv("ENTSOE_API_TOKEN")
+    eia_api_key = os.getenv("EIA_API_KEY")
     with col1:
         if api_token:
             st.success("ENTSO-E API token detected")
         else:
             st.error("ENTSO-E API token missing")
-            st.caption("Add `API_TOKEN` to `.env` for live data fetches.")
+            st.caption("Add `API_TOKEN` and/or `ENTSOE_API_TOKEN` to `.env`.")
 
     with col2:
+        if eia_api_key:
+            st.success("EIA API key detected")
+        else:
+            st.warning("EIA API key missing")
+            st.caption("Add `EIA_API_KEY` to `.env` for EIA ingestion.")
+
+    with col3:
         try:
             conn = get_db()
             with conn.cursor() as cur:
@@ -2516,7 +2868,7 @@ def render_health_setup(country, coverage):
             st.error("Database connection failed")
             st.caption(f"{exc}")
 
-    with col3:
+    with col4:
         if coverage and coverage.get("min_date") and coverage.get("max_date"):
             st.success("Historical data available")
             st.caption(
@@ -2546,19 +2898,30 @@ def render_health_setup(country, coverage):
 # MAIN NAVIGATION
 # ══════════════════════════════════════════════════════════════
 
-sections = [
-    "Overview",
-    "Carbon Intelligence",
-    "Generation Analytics",
-    "Grid Regimes & Stress Testing",
-    "Data Explorer",
-    "Technical Info",
-    "Health & Setup",
-]
+if is_eia_source:
+    sections = [
+        "Overview",
+        "EIA Retail Prices",
+        "Technical Info",
+        "Health & Setup",
+    ]
+else:
+    sections = [
+        "Overview",
+        "Carbon Intelligence",
+        "Generation Analytics",
+        "Grid Regimes & Stress Testing",
+        "Data Explorer",
+        "Technical Info",
+        "Health & Setup",
+    ]
 section = st.sidebar.radio("Navigate", sections, key="section")
 
 if section == "Overview":
-    render_overview(global_country, coverage)
+    if is_eia_source:
+        render_eia_overview(global_region, coverage, eia_overview)
+    else:
+        render_overview(global_country, coverage)
 elif section == "Carbon Intelligence":
     render_carbon_intelligence(global_country)
 elif section == "Generation Analytics":
@@ -2567,7 +2930,9 @@ elif section == "Grid Regimes & Stress Testing":
     render_regimes_and_stress(global_country)
 elif section == "Data Explorer":
     render_data_explorer(global_country, global_start, global_end)
+elif section == "EIA Retail Prices":
+    render_eia_retail_prices(global_region, global_start, global_end)
 elif section == "Technical Info":
     render_technical_info()
 elif section == "Health & Setup":
-    render_health_setup(global_country, coverage)
+    render_health_setup(global_region, coverage)

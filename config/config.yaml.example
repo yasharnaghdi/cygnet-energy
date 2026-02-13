@@ -24,6 +24,16 @@ service:
 countries:
   - DE
 
+# EIA ingestion defaults (US state-level retail prices)
+eia:
+  states:
+    # Use ALL to discover canonical state IDs from EIA facet metadata (50 states + DC).
+    - ALL
+  sectors:
+    - ALL
+  default_start: 2024-01
+  default_end: 2025-12
+
 # Data retention policy
 retention:
   keep_years: 5

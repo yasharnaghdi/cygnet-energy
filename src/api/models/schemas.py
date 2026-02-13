@@ -15,6 +15,11 @@ class CountryCode(str, Enum):
     IT = "IT"
 
 
+class RegionSource(str, Enum):
+    entsoe = "entsoe"
+    eia = "eia"
+
+
 class CarbonIntensityQuery(BaseModel):
     zone: CountryCode = Field(default=CountryCode.DE)
     threshold: int = Field(default=200, ge=1, le=2000)
@@ -162,6 +167,12 @@ class IndicatorPackageResponse(BaseModel):
             }
         }
     }
+
+
+class RegionResponse(BaseModel):
+    region_id: str
+    region_type: str
+    source: RegionSource
 
 
 class RegimeQuery(BaseModel):
