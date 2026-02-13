@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -10,6 +11,7 @@ import requests
 
 EIA_BASE = "https://api.eia.gov/v2/"
 RETAIL_SALES_DATASET = "electricity/retail-sales"
+NON_STATE_REGION_IDS = {"US", "PR", "VI", "GU", "MP", "AS", "OT", "NA"}
 
 
 @dataclass(frozen=True)
@@ -75,7 +77,12 @@ def eia_get(session: requests.Session, url: str, params: List[Tuple[str, str]], 
     return response.json()
 
 
-def fetch_all_pages(session: requests.Session, base_query: EIAQuery) -> List[dict]:
+def fetch_all_pages(
+    session: requests.Session,
+    base_query: EIAQuery,
+    *,
+    sleep_seconds: float = 0.0,
+) -> List[dict]:
     page_size = base_query.length or 5000
     offset = 0
     rows: List[dict] = []
@@ -94,10 +101,13 @@ def fetch_all_pages(session: requests.Session, base_query: EIAQuery) -> List[dic
         if total is None:
             if len(data) < page_size:
                 break
+            offset += page_size
         else:
             offset += page_size
             if offset >= int(total):
                 break
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
 
     return rows
 
@@ -105,6 +115,7 @@ def fetch_all_pages(session: requests.Session, base_query: EIAQuery) -> List[dic
 class EIAAdapter:
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.api_key = api_key or _require_api_key()
+        self.page_sleep_seconds = float(os.getenv("EIA_PAGE_SLEEP_SECONDS", "0.15"))
         self.session = requests.Session()
 
     def fetch_metadata(self, path: str = RETAIL_SALES_DATASET) -> dict:
@@ -141,7 +152,35 @@ class EIAAdapter:
             length=5000,
             offset=0,
         )
-        return fetch_all_pages(self.session, query)
+        return fetch_all_pages(
+            self.session,
+            query,
+            sleep_seconds=self.page_sleep_seconds,
+        )
+
+    def fetch_retail_state_ids(self, include_territories: bool = False) -> List[str]:
+        facet_rows = self.fetch_facet_values(RETAIL_SALES_DATASET, "stateid")
+        out: List[str] = []
+        seen = set()
+        for row in facet_rows:
+            candidate = (
+                row.get("id")
+                or row.get("stateid")
+                or row.get("value")
+                or row.get("code")
+            )
+            if not candidate:
+                continue
+            state_id = str(candidate).strip().upper()
+            if len(state_id) != 2:
+                continue
+            if not include_territories and state_id in NON_STATE_REGION_IDS:
+                continue
+            if state_id not in seen:
+                seen.add(state_id)
+                out.append(state_id)
+        out.sort()
+        return out
 
     def ingest_retail_prices(
         self,
@@ -166,43 +205,64 @@ class EIAAdapter:
 
         conn = get_connection()
         cur = conn.cursor()
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            INSERT INTO canonical_metrics (
-                timestamp_utc,
-                region_type,
-                region_id,
-                granularity,
-                metric_name,
-                metric_value,
-                metric_unit,
-                source,
-                dataset,
-                facets,
-                ingestion_timestamp
+        prepared_records = [
+            (
+                rec[0],
+                rec[1],
+                rec[2],
+                rec[3],
+                rec[4],
+                rec[5],
+                rec[6],
+                rec[7],
+                rec[8],
+                psycopg2.extras.Json(rec[9]),
+                rec[10],
             )
-            VALUES %s
-            ON CONFLICT (
-                timestamp_utc,
-                region_type,
-                region_id,
-                granularity,
-                metric_name,
-                source,
-                dataset
+            for rec in records
+        ]
+        try:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO canonical_metrics (
+                    timestamp_utc,
+                    region_type,
+                    region_id,
+                    granularity,
+                    metric_name,
+                    metric_value,
+                    metric_unit,
+                    source,
+                    dataset,
+                    facets,
+                    ingestion_timestamp
+                )
+                VALUES %s
+                ON CONFLICT (
+                    timestamp_utc,
+                    region_type,
+                    region_id,
+                    granularity,
+                    metric_name,
+                    source,
+                    dataset
+                )
+                DO UPDATE SET
+                    metric_value = EXCLUDED.metric_value,
+                    metric_unit = EXCLUDED.metric_unit,
+                    facets = EXCLUDED.facets,
+                    ingestion_timestamp = EXCLUDED.ingestion_timestamp
+                """,
+                prepared_records,
             )
-            DO UPDATE SET
-                metric_value = EXCLUDED.metric_value,
-                metric_unit = EXCLUDED.metric_unit,
-                facets = EXCLUDED.facets,
-                ingestion_timestamp = EXCLUDED.ingestion_timestamp
-            """,
-            records,
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
         return len(records)
 
     def _normalize_retail_prices(self, rows: Iterable[dict]) -> Iterable[Tuple]:

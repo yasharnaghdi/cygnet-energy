@@ -6,7 +6,7 @@ from typing import List, Optional
 import psycopg2.extras
 from fastapi import APIRouter, HTTPException, Query
 
-from src.api.models.schemas import CountryCode, IndicatorPackageResponse
+from src.api.models.schemas import CountryCode, IndicatorPackageResponse, RegionResponse, RegionSource
 from src.db.connection import get_connection
 from src.utils.zones import get_zone_keys
 
@@ -67,3 +67,37 @@ async def get_indicator_packages(
         raise HTTPException(status_code=404, detail="No indicator data available")
 
     return [IndicatorPackageResponse(**row) for row in rows]
+
+
+@router.get("/regions", response_model=List[RegionResponse])
+async def get_regions(
+    source: RegionSource = Query(default=RegionSource.entsoe),
+) -> List[RegionResponse]:
+    if source == RegionSource.entsoe:
+        return [
+            RegionResponse(region_id=zone.value, region_type="zone", source=RegionSource.entsoe)
+            for zone in CountryCode
+        ]
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT region_id
+            FROM canonical_metrics
+            WHERE source = 'EIA'
+              AND dataset = 'electricity/retail-sales'
+              AND metric_name = 'retail_price'
+            ORDER BY region_id
+            """
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    return [
+        RegionResponse(region_id=row[0], region_type="state", source=RegionSource.eia)
+        for row in rows
+    ]
