@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
+from src.api.middleware.auth import verify_token
 from src.api.middleware.rate_limit import limiter, rate_limit_exceeded_handler
-from src.api.models.schemas import ErrorResponse
-from src.api.routes import indicators, legacy
+from src.api.models.schemas import ErrorResponse, TokenData
+from src.api.routes import analytics, carbon_intensity, generation, indicators, legacy
 from src.db.connection import get_connection
 
 app = FastAPI(
@@ -60,7 +61,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         error_code=_error_code_for_status(exc.status_code, detail),
         timestamp=datetime.now(timezone.utc),
     )
-    return JSONResponse(status_code=exc.status_code, content=payload.model_dump())
+    return JSONResponse(status_code=exc.status_code, content=payload.model_dump(mode="json"))
 
 
 @app.exception_handler(RequestValidationError)
@@ -73,7 +74,7 @@ async def validation_exception_handler(
         error_code="INVALID_REQUEST",
         timestamp=datetime.now(timezone.utc),
     )
-    return JSONResponse(status_code=400, content=payload.model_dump())
+    return JSONResponse(status_code=400, content=payload.model_dump(mode="json"))
 
 
 @app.exception_handler(Exception)
@@ -83,11 +84,20 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         error_code="INTERNAL_ERROR",
         timestamp=datetime.now(timezone.utc),
     )
-    return JSONResponse(status_code=500, content=payload.model_dump())
+    return JSONResponse(status_code=500, content=payload.model_dump(mode="json"))
 
 
 app.include_router(legacy.router)
 app.include_router(indicators.router)
+app.include_router(generation.router)
+app.include_router(carbon_intensity.router)
+app.include_router(analytics.router)
+app.include_router(analytics.metrics_router)
+
+
+@app.get("/api/whoami")
+async def whoami(token: TokenData = Depends(verify_token)) -> TokenData:
+    return token
 
 
 @app.get("/healthz", include_in_schema=False)
