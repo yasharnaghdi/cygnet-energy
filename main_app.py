@@ -213,12 +213,37 @@ def get_config_eia_states():
 
 
 @st.cache_data(ttl=60)
+def get_api_base_url():
+    explicit = os.getenv("CYGNET_API_URL") or os.getenv("API_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+
+    # Avoid defaulting to Streamlit's own port when the app itself runs on :8000.
+    try:
+        streamlit_port = int(st.get_option("server.port"))
+    except Exception:
+        streamlit_port = 8501
+
+    if streamlit_port == 8000:
+        return "http://127.0.0.1:8001"
+    return "http://127.0.0.1:8000"
+
+
+@st.cache_data(ttl=30)
+def get_backend_status():
+    api_base = get_api_base_url()
+    try:
+        resp = requests.get(f"{api_base}/healthz", timeout=2)
+        if resp.status_code == 200:
+            return {"ok": True, "api_base": api_base}
+    except Exception:
+        pass
+    return {"ok": False, "api_base": api_base}
+
+
+@st.cache_data(ttl=60)
 def get_regions_from_api(source):
-    api_base = (
-        os.getenv("CYGNET_API_URL")
-        or os.getenv("API_BASE_URL")
-        or "http://localhost:8000"
-    ).rstrip("/")
+    api_base = get_api_base_url()
     try:
         resp = requests.get(
             f"{api_base}/v1/regions",
@@ -235,6 +260,34 @@ def get_regions_from_api(source):
         return regions
     except Exception:
         return []
+
+
+@st.cache_data(ttl=120)
+def get_api_renewable_fraction(zone, start_date, end_date):
+    api_base = get_api_base_url()
+    try:
+        resp = requests.get(
+            f"{api_base}/api/analytics/renewable-fraction",
+            params={
+                "zone": zone,
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+            },
+            timeout=4,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        if "renewable_pct" in df.columns:
+            df["renewable_pct"] = pd.to_numeric(df["renewable_pct"], errors="coerce")
+        return df[["timestamp", "renewable_pct"]].dropna()
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=600)
@@ -651,6 +704,26 @@ st.sidebar.markdown("### Grid Intelligence Platform")
 st.sidebar.divider()
 
 st.sidebar.header("Global Context")
+
+backend_status = get_backend_status()
+st.sidebar.caption(f"Backend API: {backend_status['api_base']}")
+if backend_status["ok"]:
+    st.sidebar.success("FastAPI backend reachable")
+else:
+    st.sidebar.warning("FastAPI backend not reachable")
+
+try:
+    streamlit_port = int(st.get_option("server.port"))
+except Exception:
+    streamlit_port = 8501
+
+if (
+    (os.getenv("CYGNET_API_URL") is None and os.getenv("API_BASE_URL") is None)
+    and streamlit_port == 8000
+):
+    st.sidebar.warning(
+        "Streamlit is running on :8000 (API default). Set CYGNET_API_URL or run Streamlit on :8501."
+    )
 
 global_source_label = st.sidebar.radio(
     "Data Source",
@@ -1614,7 +1687,7 @@ For a 100-vehicle EV fleet charging at optimal times instead of peak hours:
 
 
 def render_generation_analytics(country, start_date, end_date):
-    st.markdown(f"# Generation Analytics")
+    st.markdown("# Generation Analytics")
     st.markdown(f"Real-time electricity generation and renewable energy analytics for **{country}**")
 
     start_dt = datetime.combine(start_date, datetime.min.time())
@@ -1758,6 +1831,24 @@ def render_generation_analytics(country, start_date, end_date):
     with col4:
         avg_gen = df.groupby('time')['actual_generation_mw'].sum().mean()
         st.metric("Average Hourly", f"{avg_gen:,.0f} MW")
+
+    api_rf = get_api_renewable_fraction(country, start_date, end_date)
+    if not api_rf.empty:
+        st.markdown("### FastAPI Renewable Fraction")
+        st.caption("This series is fetched from `/api/analytics/renewable-fraction`.")
+        fig_api_rf = px.line(
+            api_rf,
+            x="timestamp",
+            y="renewable_pct",
+            labels={"timestamp": "Time", "renewable_pct": "Renewable (%)"},
+            title=f"API Renewable Fraction ({country})",
+        )
+        fig_api_rf.update_layout(height=260)
+        st.plotly_chart(fig_api_rf, use_container_width=True)
+    else:
+        st.caption(
+            "FastAPI renewable-fraction endpoint unavailable or returned no rows for this window."
+        )
 
     st.markdown("---")
 

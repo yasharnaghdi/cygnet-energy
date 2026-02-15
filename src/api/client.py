@@ -1,7 +1,11 @@
-import requests
-from typing import Optional, Dict
 from datetime import datetime
+from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import requests
+
 from src.utils.config import API_TOKEN, DEBUG
+
 
 class EntsoEAPIClient:
     """Client for ENTSO-E Transparency Platform API"""
@@ -26,6 +30,15 @@ class EntsoEAPIClient:
     def _format_datetime(self, dt: datetime) -> str:
         """Format datetime to ENTSO-E format: YYYYMMDDHHmm"""
         return dt.strftime("%Y%m%d%H%M")
+
+    def _redact_url(self, raw_url: str) -> str:
+        parts = urlsplit(raw_url)
+        query = parse_qsl(parts.query, keep_blank_values=True)
+        redacted = [
+            (k, "***REDACTED***" if k == "securityToken" else v)
+            for k, v in query
+        ]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(redacted), parts.fragment))
 
     def get_actual_generation(
         self,
@@ -77,7 +90,7 @@ class EntsoEAPIClient:
 
             if DEBUG:
                 print(f"✅ API Response: {response.status_code} for {country}")
-                print(f"📍 URL: {response.url}")
+                print(f"📍 URL: {self._redact_url(str(response.url))}")
 
             return response.text  # Returns XML
 

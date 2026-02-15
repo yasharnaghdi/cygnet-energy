@@ -4,13 +4,19 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 import psycopg2.extras
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from src.api.models.schemas import CountryCode, IndicatorPackageResponse, RegionResponse, RegionSource
+from src.api.middleware.auth import verify_token
+from src.api.models.schemas import (
+    CountryCode,
+    IndicatorPackageResponse,
+    RegionResponse,
+    RegionSource,
+)
 from src.db.connection import get_connection
 from src.utils.zones import get_zone_keys
 
-router = APIRouter(prefix="/v1", tags=["Indicators"])
+router = APIRouter(prefix="/v1", tags=["Indicators"], dependencies=[Depends(verify_token)])
 
 
 def _to_utc(value: datetime) -> datetime:

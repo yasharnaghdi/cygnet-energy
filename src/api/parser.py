@@ -3,12 +3,13 @@ XML Parser for ENTSO-E API responses
 
 Converts raw XML from ENTSO-E Transparency Platform to structured data
 """
-from typing import List, Dict, Optional
-from datetime import datetime
-import xml.etree.ElementTree as ET
-from lxml import etree
-import pandas as pd
 import logging
+import re
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+from typing import Optional
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,25 @@ class EntsoEXMLParser:
         'B20': 'Wind Offshore',
         'B21': 'Waste',
     }
+
+    @staticmethod
+    def _resolution_to_timedelta(resolution_str: str) -> timedelta:
+        """
+        Convert ENTSO-E ISO-8601 resolution strings (e.g. PT15M, PT60M, PT1H)
+        into a Python timedelta.
+        """
+        if not resolution_str:
+            return timedelta(hours=1)
+
+        match = re.match(r"^PT(?:(\d+)H)?(?:(\d+)M)?$", resolution_str)
+        if not match:
+            return timedelta(hours=1)
+
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2) or 0)
+        if hours == 0 and minutes == 0:
+            return timedelta(hours=1)
+        return timedelta(hours=hours, minutes=minutes)
 
     @staticmethod
     def parse_generation_xml(xml_string: str) -> Optional[pd.DataFrame]:
@@ -85,6 +105,7 @@ class EntsoEXMLParser:
                     # Get resolution (PT60M = hourly)
                     resolution = period.find('ns:resolution', EntsoEXMLParser.NS)
                     resolution_str = resolution.text if resolution is not None else 'PT60M'
+                    step = EntsoEXMLParser._resolution_to_timedelta(resolution_str)
 
                     # Parse points
                     for point in period.findall('ns:Point', EntsoEXMLParser.NS):
@@ -101,8 +122,7 @@ class EntsoEXMLParser:
                             continue
 
                         # Calculate timestamp (position is 1-indexed)
-                        from datetime import timedelta
-                        timestamp = start_time + timedelta(hours=pos - 1)
+                        timestamp = start_time + (step * (pos - 1))
 
                         data.append({
                             'time': timestamp,
@@ -151,6 +171,9 @@ class EntsoEXMLParser:
                         continue
 
                     start_time = datetime.fromisoformat(start.text.replace('Z', '+00:00'))
+                    resolution = period.find('ns:resolution', EntsoEXMLParser.NS)
+                    resolution_str = resolution.text if resolution is not None else 'PT60M'
+                    step = EntsoEXMLParser._resolution_to_timedelta(resolution_str)
 
                     for point in period.findall('ns:Point', EntsoEXMLParser.NS):
                         position = point.find('ns:position', EntsoEXMLParser.NS)
@@ -165,8 +188,7 @@ class EntsoEXMLParser:
                         except ValueError:
                             continue
 
-                        from datetime import timedelta
-                        timestamp = start_time + timedelta(hours=pos - 1)
+                        timestamp = start_time + (step * (pos - 1))
 
                         data.append({
                             'time': timestamp,

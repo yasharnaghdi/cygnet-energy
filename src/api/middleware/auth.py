@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
+from src.api.middleware.auth_dev import get_dev_token
 from src.api.models.schemas import TokenData
 
 _auth_scheme = HTTPBearer(auto_error=False)
@@ -99,6 +100,10 @@ def verify_token(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_auth_scheme),
 ) -> TokenData:
+    dev_token = get_dev_token(request)
+    if dev_token is not None:
+        return dev_token
+
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
