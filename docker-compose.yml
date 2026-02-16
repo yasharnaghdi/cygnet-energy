@@ -54,6 +54,11 @@ services:
     networks:
       - cygnet-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:8001/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Streamlit Application
   app:
@@ -64,7 +69,7 @@ services:
         CYGNET_VERSION: ${CYGNET_VERSION:-1.0.1}
     container_name: cygnet-app
     ports:
-      - "8501:8501"
+      - "${APP_PORT:-8501}:8501"
     environment:
       # Database connection
       DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
@@ -79,7 +84,7 @@ services:
       postgres:
         condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
     volumes:
       # Mount source for development (optional - remove for production)
       - ./src:/app/src
