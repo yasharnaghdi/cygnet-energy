@@ -40,11 +40,19 @@ class FakeLLM:
     def __init__(self, backend: str, text: str) -> None:
         self._backend = backend
         self._text = text
+        self.last_force_backend: str | None = None
 
     def refresh_backend(self) -> None:
         return None
 
-    def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 320) -> str:
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 320,
+        force_backend: str | None = None,
+    ) -> str:
+        self.last_force_backend = force_backend
         return self._text
 
     def get_backend_info(self) -> dict[str, Any]:
@@ -140,6 +148,31 @@ def test_reports_generate_with_ollama_backend(monkeypatch) -> None:
     assert payload["narrative"] == "Synthetic report from Ollama."
     assert payload["generation_time_ms"] >= 0
     assert payload["data_summary"]["zone"] == "DE"
+
+
+def test_reports_generate_passes_backend_override(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_BYPASS_DEV", "true")
+    monkeypatch.setattr(reports, "get_connection", lambda: DummyConnection(_sample_rows(48)))
+    fake_llm = FakeLLM("ollama", "Synthetic report from OpenAI.")
+    monkeypatch.setattr(reports, "get_llm", lambda: fake_llm)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/reports/generate",
+        json={
+            "persona": "trader",
+            "zone": "DE",
+            "scenario": "Base Case",
+            "date_range": ["2026-02-16", "2026-02-23"],
+            "backend": "openai",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert fake_llm.last_force_backend == "openai"
+    assert payload["backend"] == "openai"
+    assert payload["llm_available"] is True
 
 
 def test_reports_generate_with_fallback_backend(monkeypatch) -> None:

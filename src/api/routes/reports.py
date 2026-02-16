@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from src.api.middleware.auth import verify_token
 from src.api.models.schemas import TokenData
 from src.db.connection import get_connection
-from src.services.llm_client import LLMBackend, get_llm
+from src.services.llm_client import BackendType, LLMBackend, get_llm
 from src.services.report_generator import (
     build_weighted_prompt,
     normalize_scenario_name,
@@ -48,6 +48,7 @@ class ReportRequest(BaseModel):
     date_range: list[str] = Field(default_factory=list, max_length=2)
     scenario: str = Field(default="Base Case", min_length=1, max_length=64)
     parameter_weights: dict[str, float] | None = None
+    backend: BackendType | None = None
     current_soc: int = Field(default=35, ge=5, le=95)
     tight_margin_mw: int = Field(default=1500, ge=100, le=10000)
 
@@ -412,6 +413,7 @@ def _generate_report_impl(
     scenario: str,
     date_range: list[str] | None,
     parameter_weights: dict[str, float] | None,
+    backend: BackendType | None,
 ) -> ReportResponse:
     started = perf_counter()
     normalized_persona = _normalize_persona(persona)
@@ -453,10 +455,13 @@ def _generate_report_impl(
 
     llm = get_llm()
     llm.refresh_backend()
-    narrative = llm.generate(prompt, temperature=0.7, max_tokens=800)
+    narrative = llm.generate(prompt, temperature=0.7, max_tokens=800, force_backend=backend)
     backend_info = llm.get_backend_info()
-    backend = str(backend_info.get("backend", LLMBackend.FALLBACK.value))
-    llm_available = backend != LLMBackend.FALLBACK.value
+    selected_backend = backend if backend is not None else str(
+        backend_info.get("backend", LLMBackend.FALLBACK.value)
+    )
+    backend_info["backend"] = selected_backend
+    llm_available = selected_backend != LLMBackend.FALLBACK.value
 
     if not llm_available and not narrative.strip():
         narrative = _fallback_narrative(normalized_persona, data_summary, reason="No LLM output generated.")
@@ -471,7 +476,7 @@ def _generate_report_impl(
         generated_at=datetime.now(timezone.utc),
         narrative=narrative,
         data_summary=data_summary,
-        backend=backend,
+        backend=selected_backend,
         backend_info=backend_info,
         generation_time_ms=generation_time_ms,
         llm_available=llm_available,
@@ -490,6 +495,7 @@ async def generate_report(request: ReportRequest, token: TokenData = Depends(ver
             scenario=request.scenario,
             date_range=request.date_range,
             parameter_weights=request.parameter_weights,
+            backend=request.backend,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -513,6 +519,7 @@ async def generate_report_legacy_get(
             scenario="Base Case",
             date_range=[],
             parameter_weights=None,
+            backend=None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
