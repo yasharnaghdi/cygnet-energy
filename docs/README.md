@@ -19,6 +19,8 @@ Current phase status: **Phase 1 complete** ✅
 2. `docs/DEPLOYMENT_SECURE.md`: hardened deployment using `docker-compose.secure.yml`, required environment variables, and troubleshooting.
 3. `docs/SECURITY.md`: authentication model, secret-handling rules, rotation guidance, and rate-limit/security-header notes.
 4. `docs/INGESTION_ANALYSIS.md`: ingestion design and operational notes.
+5. `docs/LLM_SETUP.md`: local Ollama setup and weighted `POST /api/reports/generate` verification for AI Insights.
+6. `docs/LLM_SETUP_COMPLETE.md`: dual-backend setup (Ollama and HuggingFace), weighted AI Insights workflow, and 404/405 troubleshooting.
 
 ## Developer Quick Start
 1. Start FastAPI on `127.0.0.1:8001` (recommended in this repo state).
