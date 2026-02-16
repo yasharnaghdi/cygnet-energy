@@ -213,20 +213,39 @@ def get_config_eia_states():
 
 
 @st.cache_data(ttl=60)
-def get_api_base_url():
+def get_api_base_candidates():
     explicit = os.getenv("CYGNET_API_URL") or os.getenv("API_BASE_URL")
     if explicit:
-        return explicit.rstrip("/")
+        return [explicit.rstrip("/")]
 
-    # Avoid defaulting to Streamlit's own port when the app itself runs on :8000.
-    try:
-        streamlit_port = int(st.get_option("server.port"))
-    except Exception:
-        streamlit_port = 8501
+    return ["http://127.0.0.1:8001", "http://127.0.0.1:8000"]
 
-    if streamlit_port == 8000:
-        return "http://127.0.0.1:8001"
-    return "http://127.0.0.1:8000"
+
+@st.cache_data(ttl=30)
+def get_api_base_url():
+    candidates = get_api_base_candidates()
+    for base in candidates:
+        try:
+            resp = requests.get(f"{base}/healthz", timeout=2)
+            if resp.status_code == 200:
+                return base
+        except Exception:
+            continue
+    return candidates[0]
+
+
+@st.cache_data(ttl=20)
+def get_reports_backend_status():
+    for base in get_api_base_candidates():
+        try:
+            resp = requests.get(f"{base}/api/reports/backend-status", timeout=2)
+            if resp.status_code == 200:
+                payload = resp.json()
+                payload["api_base"] = base
+                return payload
+        except Exception:
+            continue
+    return None
 
 
 @st.cache_data(ttl=30)
@@ -946,6 +965,223 @@ st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 # ══════════════════════════════════════════════════════════════
 # TAB RENDERERS
 # ══════════════════════════════════════════════════════════════
+
+def render_ai_insights(zone):
+    st.markdown("# AI Insights")
+    st.markdown(
+        "Generate weighted market narratives from local grid conditions. "
+        "Use scenario presets or custom weights to steer LLM attention."
+    )
+
+    backend_status = get_reports_backend_status()
+    if backend_status:
+        backend = backend_status.get("backend")
+        active_base = backend_status.get("api_base")
+        st.caption(f"Reports API: {active_base}")
+        if backend == "ollama":
+            st.success(f"Backend: ollama ({backend_status.get('ollama_model')})")
+        elif backend == "huggingface":
+            device = backend_status.get("hf_device") or "cpu"
+            st.info(f"Backend: huggingface ({device})")
+        else:
+            st.warning(
+                "Backend: fallback. Install Ollama or run `poetry install --extras llm` for local AI generation."
+            )
+    else:
+        st.warning(
+            "Reports backend was not discovered on default local ports. "
+            "Set CYGNET_API_URL to the FastAPI base URL if needed."
+        )
+
+    scenario_weights = {
+        "Base Case": {"price": 0.4, "renewable_share": 0.2, "margin": 0.2, "carbon": 0.2},
+        "High Renewable": {"renewable_share": 0.5, "carbon": 0.3, "price": 0.1, "margin": 0.1},
+        "Grid Stress": {"margin": 0.5, "price": 0.3, "renewable_share": 0.1, "carbon": 0.1},
+    }
+
+    st.header("1. Select Analysis Scenario")
+    scenario = st.radio(
+        "Choose your market focus:",
+        options=["Base Case", "High Renewable", "Grid Stress", "Custom"],
+        key="ai_insights_scenario",
+        help="Scenario presets define default parameter attention weights for the report.",
+        horizontal=True,
+    )
+
+    st.header("2. Select Market Parameters")
+    today = datetime.utcnow().date()
+    default_end = today + timedelta(days=7)
+
+    default_zone = str(zone).strip().upper() if zone else "DE"
+    zone_options = [default_zone]
+    for candidate in ["DE", "FR", "NL", "BE"]:
+        if candidate not in zone_options:
+            zone_options.append(candidate)
+
+    persona_map = {
+        "Trader": "trader",
+        "Grid Operator": "operator",
+        "Policy Analyst": "policymaker",
+    }
+
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_zone = st.selectbox(
+            "Bidding Zone",
+            options=zone_options,
+            key="ai_insights_zone",
+        )
+        selected_range = st.date_input(
+            "Analysis Period",
+            value=(today, default_end),
+            key="ai_insights_date_range",
+        )
+    with col2:
+        persona_label = st.selectbox(
+            "Analysis Perspective",
+            options=list(persona_map.keys()),
+            key="ai_insights_persona",
+            help="Changes report framing and recommended actions.",
+        )
+        persona = persona_map[persona_label]
+
+    if isinstance(selected_range, tuple):
+        range_values = list(selected_range)
+    elif isinstance(selected_range, list):
+        range_values = selected_range
+    else:
+        range_values = [selected_range]
+
+    if not range_values:
+        range_values = [today, default_end]
+    if len(range_values) == 1:
+        range_values = [range_values[0], range_values[0] + timedelta(days=1)]
+
+    range_values = sorted(range_values[:2])
+    date_range = [item.isoformat() for item in range_values]
+
+    if scenario == "Custom":
+        st.subheader("Adjust Parameter Importance")
+        st.caption("Weights are normalized and passed to the backend for weighted prompt construction.")
+        price_weight = st.slider("Price Sensitivity", 0.0, 1.0, 0.25, 0.05, key="ai_weight_price")
+        renewable_weight = st.slider(
+            "Renewable Share Focus", 0.0, 1.0, 0.25, 0.05, key="ai_weight_renewable"
+        )
+        margin_weight = st.slider("Reserve Margin Importance", 0.0, 1.0, 0.25, 0.05, key="ai_weight_margin")
+        carbon_weight = st.slider("Carbon Intensity Focus", 0.0, 1.0, 0.25, 0.05, key="ai_weight_carbon")
+        total_weight = price_weight + renewable_weight + margin_weight + carbon_weight
+        if total_weight <= 0:
+            weights = {"price": 0.25, "renewable_share": 0.25, "margin": 0.25, "carbon": 0.25}
+            st.warning("All custom weights were zero. Using equal weighting.")
+        else:
+            weights = {
+                "price": price_weight / total_weight,
+                "renewable_share": renewable_weight / total_weight,
+                "margin": margin_weight / total_weight,
+                "carbon": carbon_weight / total_weight,
+            }
+    else:
+        weights = scenario_weights[scenario]
+
+    st.header("3. Generate AI Insights")
+    if st.button("Run Analysis", type="primary", use_container_width=True, key="ai_insights_generate"):
+        api_base = backend_status.get("api_base") if backend_status else get_api_base_url()
+        report_request = {
+            "persona": persona,
+            "zone": selected_zone,
+            "date_range": date_range,
+            "scenario": scenario,
+            "parameter_weights": weights,
+        }
+
+        with st.spinner("Analyzing market data with local LLM..."):
+            try:
+                response = requests.post(
+                    f"{api_base}/api/reports/generate",
+                    json=report_request,
+                    timeout=200,
+                )
+            except requests.Timeout:
+                st.error("Analysis timed out after 200 seconds.")
+                st.caption("Try a smaller date range or a lighter local model.")
+                return
+            except Exception as exc:
+                st.error("Report request failed.")
+                st.caption(f"Error: {exc}")
+                return
+
+        if response.status_code == 405:
+            legacy_params = {
+                "persona": persona,
+                "zone": selected_zone,
+                "current_soc": 35,
+                "tight_margin_mw": 1500,
+            }
+            try:
+                legacy_response = requests.get(
+                    f"{api_base}/api/reports/generate",
+                    params=legacy_params,
+                    timeout=200,
+                )
+                if legacy_response.status_code == 200:
+                    response = legacy_response
+                    st.warning(
+                        "Connected API is using the legacy reports route. "
+                        "Scenario weights were not applied for this request."
+                    )
+                else:
+                    response = legacy_response
+            except Exception as exc:
+                st.error("Legacy report fallback failed.")
+                st.caption(f"Error: {exc}")
+                return
+
+        if response.status_code == 404:
+            for alt_base in get_api_base_candidates():
+                if alt_base == api_base:
+                    continue
+                try:
+                    retry = requests.post(
+                        f"{alt_base}/api/reports/generate",
+                        json=report_request,
+                        timeout=200,
+                    )
+                except Exception:
+                    continue
+                if retry.status_code != 404:
+                    response = retry
+                    api_base = alt_base
+                    st.caption(f"Retried report request against {api_base}.")
+                    break
+
+        if response.status_code != 200:
+            st.error(f"Report generation failed ({response.status_code}).")
+            st.caption(response.text)
+            if response.status_code == 401:
+                st.caption("Enable AUTH_BYPASS_DEV=true for local development without bearer tokens.")
+            return
+
+        report = response.json()
+        st.success("Analysis complete.")
+        st.subheader(f"Report for {persona_label}")
+        st.markdown(report.get("narrative", "No narrative returned."))
+
+        with st.expander("Analysis context"):
+            st.json(
+                {
+                    "scenario": report.get("scenario", scenario),
+                    "date_range": report.get("date_range", date_range),
+                    "parameter_weights": report.get("parameter_weights", weights),
+                }
+            )
+            st.json(report.get("data_summary", {}))
+
+        backend = report.get("backend")
+        if report.get("llm_available"):
+            st.success(f"Generated using backend: {backend}")
+        else:
+            st.warning("LLM backend unavailable. Displaying fallback summary.")
+
 
 def render_overview(country, coverage):
     data_sufficiency = describe_data_sufficiency(coverage)
@@ -2998,6 +3234,7 @@ if is_eia_source:
     ]
 else:
     sections = [
+        "AI Insights",
         "Overview",
         "Carbon Intelligence",
         "Generation Analytics",
@@ -3013,6 +3250,8 @@ if section == "Overview":
         render_eia_overview(global_region, coverage, eia_overview)
     else:
         render_overview(global_country, coverage)
+elif section == "AI Insights":
+    render_ai_insights(global_country)
 elif section == "Carbon Intelligence":
     render_carbon_intelligence(global_country)
 elif section == "Generation Analytics":
