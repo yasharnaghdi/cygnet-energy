@@ -973,25 +973,79 @@ def render_ai_insights(zone):
         "Use scenario presets or custom weights to steer LLM attention."
     )
 
-    backend_status = get_reports_backend_status()
-    if backend_status:
-        backend = backend_status.get("backend")
-        active_base = backend_status.get("api_base")
-        st.caption(f"Reports API: {active_base}")
-        if backend == "ollama":
-            st.success(f"Backend: ollama ({backend_status.get('ollama_model')})")
-        elif backend == "huggingface":
-            device = backend_status.get("hf_device") or "cpu"
-            st.info(f"Backend: huggingface ({device})")
-        else:
-            st.warning(
-                "Backend: fallback. Install Ollama or run `poetry install --extras llm` for local AI generation."
+    reports_backend_status = get_reports_backend_status()
+    api_base = get_api_base_url()
+    backend_choice = None
+    backend_labels = {}
+
+    st.sidebar.subheader("LLM Backend")
+    if reports_backend_status:
+        available = reports_backend_status.get("available_backends", [])
+        current = reports_backend_status.get("backend", "fallback")
+        api_base = reports_backend_status.get("api_base", api_base)
+
+        backend_options = []
+        if "openai" in available:
+            model = reports_backend_status.get("openai_model") or "gpt-4o-mini"
+            backend_options.append("openai")
+            backend_labels["openai"] = f"OpenAI ({model})"
+        if "ollama" in available:
+            model = reports_backend_status.get("ollama_model") or "local"
+            backend_options.append("ollama")
+            backend_labels["ollama"] = f"Ollama ({model})"
+        if "huggingface" in available:
+            model = reports_backend_status.get("hf_model") or "local"
+            backend_options.append("huggingface")
+            backend_labels["huggingface"] = f"HuggingFace ({model})"
+
+        if not backend_options:
+            st.sidebar.error("No LLM backends available")
+            st.sidebar.markdown(
+                """
+Setup options:
+
+1. OpenAI
+`OPENAI_API_KEY=sk-proj-...`
+
+2. Ollama
+`ollama pull phi3:mini`
+
+3. HuggingFace
+`poetry install --extras llm`
+"""
             )
+        else:
+            if "ai_backend_choice" in st.session_state and st.session_state["ai_backend_choice"] in backend_options:
+                default_index = backend_options.index(st.session_state["ai_backend_choice"])
+            elif current in backend_options:
+                default_index = backend_options.index(current)
+            else:
+                default_index = 0
+
+            backend_choice = st.sidebar.radio(
+                "Select backend:",
+                options=backend_options,
+                index=default_index,
+                format_func=lambda option: backend_labels[option],
+                key="ai_backend_choice",
+            )
+
+            if backend_choice == "openai":
+                st.sidebar.info("Fast generation (~5-10s)\nLow per-report API cost.")
+            elif backend_choice == "ollama":
+                st.sidebar.info("Runs locally at no API cost.\nTypical latency: ~30-60s.")
+            elif backend_choice == "huggingface":
+                st.sidebar.info("Runs locally with transformers.\nTypical latency: ~60-180s.")
     else:
+        st.sidebar.error("Cannot reach reports backend status endpoint.")
         st.warning(
             "Reports backend was not discovered on default local ports. "
             "Set CYGNET_API_URL to the FastAPI base URL if needed."
         )
+
+    st.caption(f"Reports API: {api_base}")
+    if backend_choice:
+        st.info(f"Selected backend: {backend_labels[backend_choice]}")
 
     scenario_weights = {
         "Base Case": {"price": 0.4, "renewable_share": 0.2, "margin": 0.2, "carbon": 0.2},
@@ -1084,26 +1138,31 @@ def render_ai_insights(zone):
         weights = scenario_weights[scenario]
 
     st.header("3. Generate AI Insights")
+    if not backend_choice:
+        st.warning("No LLM backend is currently available. Use the sidebar setup instructions.")
+        return
+
     if st.button("Run Analysis", type="primary", use_container_width=True, key="ai_insights_generate"):
-        api_base = backend_status.get("api_base") if backend_status else get_api_base_url()
         report_request = {
             "persona": persona,
             "zone": selected_zone,
             "date_range": date_range,
             "scenario": scenario,
             "parameter_weights": weights,
+            "backend": backend_choice,
         }
+        timeout_seconds = 60 if backend_choice == "openai" else 200
 
-        with st.spinner("Analyzing market data with local LLM..."):
+        with st.spinner(f"Analyzing market data with {backend_labels[backend_choice]}..."):
             try:
                 response = requests.post(
                     f"{api_base}/api/reports/generate",
                     json=report_request,
-                    timeout=200,
+                    timeout=timeout_seconds,
                 )
             except requests.Timeout:
-                st.error("Analysis timed out after 200 seconds.")
-                st.caption("Try a smaller date range or a lighter local model.")
+                st.error(f"Analysis timed out after {timeout_seconds} seconds.")
+                st.caption("Try a different backend or smaller date range.")
                 return
             except Exception as exc:
                 st.error("Report request failed.")
@@ -1127,7 +1186,7 @@ def render_ai_insights(zone):
                     response = legacy_response
                     st.warning(
                         "Connected API is using the legacy reports route. "
-                        "Scenario weights were not applied for this request."
+                        "Scenario weights and backend override were not applied for this request."
                     )
                 else:
                     response = legacy_response
@@ -1144,7 +1203,7 @@ def render_ai_insights(zone):
                     retry = requests.post(
                         f"{alt_base}/api/reports/generate",
                         json=report_request,
-                        timeout=200,
+                        timeout=timeout_seconds,
                     )
                 except Exception:
                     continue
@@ -1162,7 +1221,7 @@ def render_ai_insights(zone):
             return
 
         report = response.json()
-        st.success("Analysis complete.")
+        st.success(f"Analysis complete ({report.get('backend', backend_choice)}).")
         st.subheader(f"Report for {persona_label}")
         st.markdown(report.get("narrative", "No narrative returned."))
 

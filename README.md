@@ -20,7 +20,7 @@ docker compose ps
 
 Expected healthy state:
 - Smoke check ends with `All smoke checks passed.`
-- Docker baseline stack shows running containers for app and database.
+- Docker baseline stack shows running containers for `postgres`, `api`, and `app`.
 
 ## v1.1.0 Scope
 - OIDC/JWT auth with JWKS-backed token validation

@@ -4,14 +4,26 @@ import logging
 import os
 from enum import Enum
 from importlib.util import find_spec
-from typing import Any
+from typing import Any, Literal
 
 import requests
+
+try:
+    from openai import OpenAI
+
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OpenAI = None  # type: ignore[assignment]
+    OPENAI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 
+BackendType = Literal["openai", "ollama", "huggingface", "fallback"]
+
+
 class LLMBackend(str, Enum):
+    OPENAI = "openai"
     OLLAMA = "ollama"
     HUGGINGFACE = "huggingface"
     FALLBACK = "fallback"
@@ -20,22 +32,39 @@ class LLMBackend(str, Enum):
 class UnifiedLLMClient:
     """
     Unified local LLM client.
-    Priority: Ollama -> HuggingFace transformers -> structured fallback text.
+    Priority: Ollama -> HuggingFace transformers -> OpenAI -> structured fallback text.
     """
 
     def __init__(self) -> None:
         self.backend: LLMBackend = LLMBackend.FALLBACK
+        self.openai_client: Any | None = None
+        self.openai_api_key: str | None = None
+        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-        self.ollama_model = os.getenv("OLLAMA_MODEL", "llama2:7b")
+        self.ollama_model = os.getenv("OLLAMA_MODEL", "phi3:mini")
         self.hf_model_name = os.getenv("HF_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
         self.hf_model: Any | None = None
         self.hf_tokenizer: Any | None = None
         self.hf_device: str | None = None
 
-        self._detect_backend()
+        self.refresh_backend()
 
-    def _detect_backend(self) -> None:
+    def refresh_backend(self, force_backend: BackendType | None = None) -> None:
+        """
+        Re-run backend detection.
+        Useful when backend services are started after API process boot.
+        """
+        if force_backend is not None:
+            selected = LLMBackend(force_backend)
+            if self._is_backend_available(selected):
+                self.backend = selected
+                logger.info("LLM backend forced to: %s", selected.value)
+            else:
+                self.backend = LLMBackend.FALLBACK
+                logger.warning("Requested backend unavailable: %s. Falling back.", selected.value)
+            return
+
         if self._check_ollama():
             self.backend = LLMBackend.OLLAMA
             logger.info("LLM backend selected: ollama")
@@ -46,20 +75,58 @@ class UnifiedLLMClient:
             logger.info("LLM backend selected: huggingface")
             return
 
+        if self._check_openai():
+            self.backend = LLMBackend.OPENAI
+            logger.info("LLM backend selected: openai")
+            return
+
         self.backend = LLMBackend.FALLBACK
-        logger.warning("No local LLM backend available. Using fallback summaries.")
+        logger.warning("No LLM backend available. Using fallback summaries.")
+
+    def _is_backend_available(self, backend: LLMBackend) -> bool:
+        if backend == LLMBackend.OPENAI:
+            return self._check_openai()
+        if backend == LLMBackend.OLLAMA:
+            return self._check_ollama()
+        if backend == LLMBackend.HUGGINGFACE:
+            return self._check_huggingface()
+        return True
+
+    def _check_openai(self) -> bool:
+        if not OPENAI_AVAILABLE:
+            return False
+
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        if not api_key:
+            self.openai_client = None
+            self.openai_api_key = None
+            return False
+
+        if self.openai_client is not None and self.openai_api_key == api_key:
+            return True
+
+        try:
+            self.openai_client = OpenAI(api_key=api_key)
+            self.openai_api_key = api_key
+            return True
+        except Exception as exc:
+            logger.error("OpenAI client init failed: %s", exc)
+            self.openai_client = None
+            self.openai_api_key = None
+            return False
 
     def _check_ollama(self) -> bool:
+        self.ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        self.ollama_model = os.getenv("OLLAMA_MODEL", "phi3:mini")
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=2)
-            response.raise_for_status()
-            models = response.json().get("models", [])
-            names = {str(model.get("name", "")) for model in models if isinstance(model, dict)}
-            return self.ollama_model in names or any(name.startswith(f"{self.ollama_model}:") for name in names)
+            return response.status_code == 200
         except Exception:
             return False
 
     def _check_huggingface(self) -> bool:
+        self.hf_model_name = os.getenv("HF_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
         return find_spec("transformers") is not None and find_spec("torch") is not None
 
     def _load_hf_model(self) -> None:
@@ -90,20 +157,35 @@ class UnifiedLLMClient:
             self.hf_device = None
             self.backend = LLMBackend.FALLBACK
 
-    def refresh_backend(self) -> None:
-        """
-        Re-run backend detection.
-        Useful when Ollama is started after API process boot.
-        """
-        self._detect_backend()
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 320,
+        force_backend: BackendType | None = None,
+    ) -> str:
+        if force_backend is not None:
+            requested_backend = LLMBackend(force_backend)
+            if not self._is_backend_available(requested_backend):
+                raise ValueError(f"{requested_backend.value} backend is not available.")
+            text = self._generate_with_backend(
+                requested_backend,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            if text:
+                return text
+            raise RuntimeError(f"{requested_backend.value} generation failed.")
 
-    def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 320) -> str:
         if self.backend == LLMBackend.OLLAMA:
             text = self._generate_ollama(prompt, temperature=temperature, max_tokens=max_tokens)
             if text:
                 return text
             if self._check_huggingface():
                 self.backend = LLMBackend.HUGGINGFACE
+            elif self._check_openai():
+                self.backend = LLMBackend.OPENAI
             else:
                 self.backend = LLMBackend.FALLBACK
 
@@ -111,9 +193,66 @@ class UnifiedLLMClient:
             text = self._generate_huggingface(prompt, temperature=temperature, max_tokens=max_tokens)
             if text:
                 return text
+            if self._check_openai():
+                self.backend = LLMBackend.OPENAI
+            else:
+                self.backend = LLMBackend.FALLBACK
+
+        if self.backend == LLMBackend.OPENAI:
+            try:
+                text = self._generate_openai(prompt, temperature=temperature, max_tokens=max_tokens)
+                if text:
+                    return text
+            except Exception as exc:
+                logger.error("OpenAI generation failed: %s", exc)
             self.backend = LLMBackend.FALLBACK
 
         return self._generate_fallback(prompt)
+
+    def _generate_with_backend(
+        self, backend: LLMBackend, prompt: str, temperature: float, max_tokens: int
+    ) -> str | None:
+        if backend == LLMBackend.OPENAI:
+            return self._generate_openai(prompt, temperature=temperature, max_tokens=max_tokens)
+        if backend == LLMBackend.OLLAMA:
+            return self._generate_ollama(prompt, temperature=temperature, max_tokens=max_tokens)
+        if backend == LLMBackend.HUGGINGFACE:
+            return self._generate_huggingface(prompt, temperature=temperature, max_tokens=max_tokens)
+        return self._generate_fallback(prompt)
+
+    def _generate_openai(self, prompt: str, temperature: float, max_tokens: int) -> str:
+        if self.openai_client is None and not self._check_openai():
+            raise ValueError("OpenAI is not configured. Set OPENAI_API_KEY in .env")
+
+        env_max_tokens = os.getenv("OPENAI_MAX_TOKENS")
+        env_temperature = os.getenv("OPENAI_TEMPERATURE")
+        final_max_tokens = max_tokens
+        final_temperature = temperature
+
+        if env_max_tokens:
+            try:
+                final_max_tokens = int(env_max_tokens)
+            except ValueError:
+                logger.warning("Invalid OPENAI_MAX_TOKENS=%s. Using %s.", env_max_tokens, max_tokens)
+
+        if env_temperature:
+            try:
+                final_temperature = float(env_temperature)
+            except ValueError:
+                logger.warning("Invalid OPENAI_TEMPERATURE=%s. Using %s.", env_temperature, temperature)
+
+        response = self.openai_client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": "You are an energy market analyst."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=final_max_tokens,
+            temperature=final_temperature,
+            timeout=60,
+        )
+        content = response.choices[0].message.content
+        return (content or "").strip()
 
     def _generate_ollama(self, prompt: str, temperature: float, max_tokens: int) -> str | None:
         try:
@@ -182,16 +321,35 @@ class UnifiedLLMClient:
             "Enable a local model:\n"
             "1. Ollama path: install Ollama, pull a model, run `ollama serve`\n"
             "2. HuggingFace path: `poetry install --extras llm`\n"
+            "3. OpenAI path: set `OPENAI_API_KEY` and `OPENAI_MODEL` in `.env`\n"
             f"Active backend: {self.backend.value}"
         )
 
-    def get_backend_info(self) -> dict[str, Any]:
+    def get_available_backends(self) -> dict[BackendType, bool]:
         return {
-            "backend": self.backend.value,
-            "ollama_url": self.ollama_url if self.backend == LLMBackend.OLLAMA else None,
-            "ollama_model": self.ollama_model if self.backend == LLMBackend.OLLAMA else None,
-            "hf_model": self.hf_model_name if self.backend == LLMBackend.HUGGINGFACE else None,
-            "hf_device": self.hf_device if self.backend == LLMBackend.HUGGINGFACE else None,
+            "openai": self._check_openai(),
+            "ollama": self._check_ollama(),
+            "huggingface": self._check_huggingface(),
+            "fallback": True,
+        }
+
+    def get_backend_info(self) -> dict[str, Any]:
+        available = self.get_available_backends()
+        available_backends = [name for name, is_available in available.items() if is_available]
+        backend = self.backend.value
+
+        if backend not in available_backends:
+            self.refresh_backend()
+            backend = self.backend.value
+
+        return {
+            "backend": backend,
+            "available_backends": available_backends,
+            "openai_model": self.openai_model if available["openai"] else None,
+            "ollama_url": self.ollama_url if available["ollama"] else None,
+            "ollama_model": self.ollama_model if available["ollama"] else None,
+            "hf_model": self.hf_model_name if available["huggingface"] else None,
+            "hf_device": self.hf_device if backend == LLMBackend.HUGGINGFACE.value else None,
         }
 
 

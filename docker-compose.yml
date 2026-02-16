@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -22,6 +20,41 @@ services:
     networks:
       - cygnet-network
 
+  # FastAPI backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CYGNET_VERSION: ${CYGNET_VERSION:-1.0.1}
+    container_name: cygnet-api
+    command: >
+      poetry run uvicorn src.api.main:app
+      --host 0.0.0.0
+      --port 8001
+      --reload
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
+      AUTH_BYPASS_DEV: ${AUTH_BYPASS_DEV:-true}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3:mini}
+      HF_MODEL: ${HF_MODEL:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_MAX_TOKENS: ${OPENAI_MAX_TOKENS:-1000}
+      OPENAI_TEMPERATURE: ${OPENAI_TEMPERATURE:-0.7}
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    networks:
+      - cygnet-network
+    restart: unless-stopped
+
   # Streamlit Application
   app:
     build:
@@ -34,7 +67,8 @@ services:
       - "8501:8501"
     environment:
       # Database connection
-      DATABASE_URL: postgresql://cygnet:cygnet_password@postgres:5432/energy_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
+      CYGNET_API_URL: ${CYGNET_API_URL:-http://api:8001}
 
       # ENTSO-E API (add your token)
       ENTSOE_API_TOKEN: ${ENTSOE_API_TOKEN:-your-token-here}
@@ -44,6 +78,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      api:
+        condition: service_started
     volumes:
       # Mount source for development (optional - remove for production)
       - ./src:/app/src
