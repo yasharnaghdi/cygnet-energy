@@ -16,6 +16,9 @@ logs/
 *.pid
 .DS_Store
 *.sqlite
+.coverage
+*.backup
+*.bak
 .idea/
 .vscode/
 data/samples/
