@@ -1,0 +1,28 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Never send local secrets or backups into Docker build context.
+.env
+.env.*
+!.env.example
+!.env.docker.example
+*.backup
+*.bak
+secrets.toml
+config/secrets.yaml
+
+# Local runtime artifacts
+.coverage
+htmlcov/
+*.log
+*.pid
+data/

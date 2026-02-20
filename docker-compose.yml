@@ -33,6 +33,8 @@ services:
       - "8001:8001"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
+      API_TOKEN: ${API_TOKEN:-}
+      ENTSOE_API_TOKEN: ${ENTSOE_API_TOKEN:-}
       AUTH_BYPASS_DEV: ${AUTH_BYPASS_DEV:-true}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3:mini}
@@ -46,7 +48,10 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./:/app
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./config:/app/config
     networks:
       - cygnet-network
     restart: unless-stopped
