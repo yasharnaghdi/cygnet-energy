@@ -121,12 +121,38 @@ def _resolve_period_label(date_range: Sequence[str] | None) -> str:
     return f"{date_range[0]} to {date_range[1]}"
 
 
+def _summarize_context_mapping(value: Any) -> str:
+    if not isinstance(value, Mapping) or not value:
+        return "Not analyzed yet"
+    parts: list[str] = []
+    for key, raw in value.items():
+        if isinstance(raw, Mapping):
+            if "zone" in raw:
+                parts.append(f"{key}={raw.get('zone')}")
+            elif "state" in raw:
+                parts.append(f"{key}={raw.get('state')}")
+            elif "rows" in raw:
+                parts.append(f"{key} rows={raw.get('rows')}")
+            continue
+        if isinstance(raw, list):
+            if raw:
+                parts.append(f"{key}={','.join(str(item) for item in raw[:3])}")
+            continue
+        if raw in (None, "", {}):
+            continue
+        parts.append(f"{key}={raw}")
+    if not parts:
+        return "Not analyzed yet"
+    return "; ".join(parts[:6])
+
+
 def build_weighted_prompt(
     data: Mapping[str, Any],
     persona: str,
     scenario: str,
     date_range: Sequence[str] | None,
     weights: Mapping[str, float],
+    session_context: Mapping[str, Any] | None = None,
 ) -> str:
     persona_role, persona_task = PERSONA_CONTEXT.get(
         persona,
@@ -146,6 +172,22 @@ def build_weighted_prompt(
     priority_lines = "\n".join(
         f"- {WEIGHT_LABELS.get(key, key)}: {value:.0%} importance" for key, value in sorted_weights
     )
+    session_context = session_context or {}
+    visited_tabs = session_context.get("visited_tabs") or data.get("visited_tabs") or []
+    if isinstance(visited_tabs, Sequence) and not isinstance(visited_tabs, str):
+        visited_tabs_label = ", ".join(str(item) for item in visited_tabs) if visited_tabs else "None"
+    else:
+        visited_tabs_label = str(visited_tabs)
+    generated_charts = session_context.get("generated_charts") or data.get("generated_charts") or []
+    if isinstance(generated_charts, Sequence) and not isinstance(generated_charts, str):
+        generated_charts_label = ", ".join(str(item) for item in generated_charts) if generated_charts else "None"
+    else:
+        generated_charts_label = str(generated_charts)
+
+    generation_context = data.get("generation_context") or session_context.get("generation_params")
+    load_context = data.get("load_context") or session_context.get("load_params")
+    carbon_context = data.get("carbon_context") or session_context.get("carbon_params")
+    price_context = data.get("price_context") or session_context.get("price_params")
 
     return (
         f"You are an energy market analyst supporting a {persona_role}.\n\n"
@@ -163,9 +205,17 @@ def build_weighted_prompt(
         f"- Carbon Intensity: {_to_float(data.get('avg_carbon_g_per_kwh')):.0f} gCO2/kWh\n"
         f"- Tight Hours (7d): {_to_float(data.get('tight_hours_count_7d')):.0f}\n"
         f"- Peak Load: {_to_float(data.get('peak_load_mw')):.0f} MW\n\n"
+        "Session Context Across Dashboard Tabs:\n"
+        f"- Tabs visited: {visited_tabs_label}\n"
+        f"- Charts generated: {generated_charts_label}\n"
+        f"- Generation context: {_summarize_context_mapping(generation_context)}\n"
+        f"- Load context: {_summarize_context_mapping(load_context)}\n"
+        f"- Carbon context: {_summarize_context_mapping(carbon_context)}\n"
+        f"- Price context: {_summarize_context_mapping(price_context)}\n\n"
         "Instructions:\n"
         f"- {persona_task}\n"
         "- Distribute attention proportionally to the listed weights.\n"
         "- Focus first on the primary focus, then secondary focus, and mention other factors briefly.\n"
-        "- Keep the analysis operational, concrete, and numerically grounded."
+        "- Keep the analysis operational, concrete, and numerically grounded.\n"
+        "- Reference insights from visited tabs when available."
     )

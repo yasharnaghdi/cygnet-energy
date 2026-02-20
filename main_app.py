@@ -7,6 +7,9 @@ with a unified Global Sidebar navigation.
 import sys
 import os
 import math
+import json
+import uuid
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -73,6 +76,13 @@ REGIME_FEATURE_DETAILS = {
     "price_volatility": "Price variability over recent hours. Higher values indicate instability or stress.",
 }
 
+SCENARIO_DEFAULT_WEIGHTS = {
+    "Base Case": {"price": 0.4, "renewable_share": 0.2, "margin": 0.2, "carbon": 0.2},
+    "High Renewable": {"renewable_share": 0.5, "carbon": 0.3, "price": 0.1, "margin": 0.1},
+    "Grid Stress": {"margin": 0.5, "price": 0.3, "renewable_share": 0.1, "carbon": 0.1},
+    "Custom": {"price": 0.25, "renewable_share": 0.25, "margin": 0.25, "carbon": 0.25},
+}
+
 
 # ══════════════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -83,6 +93,74 @@ st.set_page_config(
     page_icon="🌍",
     initial_sidebar_state="expanded",
 )
+
+logger = logging.getLogger(__name__)
+
+if "active_page" not in st.session_state:
+    st.session_state["active_page"] = "Generation Analytics"
+
+if "context_buffer" not in st.session_state:
+    st.session_state["context_buffer"] = {}
+
+def _default_analysis_session() -> dict:
+    now_iso = datetime.utcnow().isoformat()
+    return {
+        "session_id": str(uuid.uuid4()),
+        "started_at": now_iso,
+        "updated_at": now_iso,
+        "scenario": "Base Case",
+        "zone": "DE",
+        "date_range": None,
+        "generation_params": {},
+        "load_params": {},
+        "carbon_params": {},
+        "price_params": {},
+        "parameter_weights": None,
+        "visited_tabs": [],
+        "generated_charts": [],
+    }
+
+
+def _ensure_analysis_session() -> dict:
+    if "analysis_session" not in st.session_state:
+        st.session_state["analysis_session"] = _default_analysis_session()
+
+    session = st.session_state["analysis_session"]
+    defaults = _default_analysis_session()
+    for key, value in defaults.items():
+        session.setdefault(key, value)
+
+    context_buffer = st.session_state.get("context_buffer", {})
+    if isinstance(context_buffer, dict):
+        for key, value in context_buffer.items():
+            if key.endswith("_params") or key in {
+                "zone",
+                "scenario",
+                "date_range",
+                "parameter_weights",
+                "updated_at",
+                "generated_charts",
+                "visited_tabs",
+            }:
+                session[key] = value
+    return session
+
+
+def update_session_context(tab_name: str, params: dict | None = None, charts: list[str] | None = None) -> None:
+    context_buffer = st.session_state.setdefault("context_buffer", {})
+
+    visited_tabs = context_buffer.setdefault("visited_tabs", [])
+    if tab_name not in visited_tabs:
+        visited_tabs.append(tab_name)
+
+    if params is not None:
+        context_buffer[f"{tab_name}_params"] = params
+    if charts:
+        existing = set(context_buffer.get("generated_charts", []))
+        existing.update(charts)
+        context_buffer["generated_charts"] = sorted(existing)
+
+    context_buffer["updated_at"] = datetime.utcnow().isoformat()
 
 # Professional CSS (kept from original streamlit_carbon_app.py)
 st.markdown(
@@ -126,7 +204,11 @@ st.markdown(
 # ══════════════════════════════════════════════════════════════
 @st.cache_resource
 def get_db():
-    return get_connection()
+    conn = get_connection()
+    # Streamlit reuses one long-lived connection; autocommit prevents failed
+    # read queries from leaving the connection in an aborted transaction state.
+    conn.autocommit = True
+    return conn
 
 def render_db_error(context, exc):
     st.error(f"{context} is unavailable because the database connection failed.")
@@ -221,12 +303,19 @@ def get_api_base_candidates():
     return ["http://127.0.0.1:8001", "http://127.0.0.1:8000"]
 
 
+def get_api_auth_headers():
+    token = (os.getenv("CYGNET_API_BEARER_TOKEN") or os.getenv("API_BEARER_TOKEN") or "").strip()
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
 @st.cache_data(ttl=30)
 def get_api_base_url():
     candidates = get_api_base_candidates()
     for base in candidates:
         try:
-            resp = requests.get(f"{base}/healthz", timeout=2)
+            resp = requests.get(f"{base}/healthz", timeout=2, headers=get_api_auth_headers())
             if resp.status_code == 200:
                 return base
         except Exception:
@@ -238,7 +327,11 @@ def get_api_base_url():
 def get_reports_backend_status():
     for base in get_api_base_candidates():
         try:
-            resp = requests.get(f"{base}/api/reports/backend-status", timeout=2)
+            resp = requests.get(
+                f"{base}/api/reports/backend-status",
+                timeout=2,
+                headers=get_api_auth_headers(),
+            )
             if resp.status_code == 200:
                 payload = resp.json()
                 payload["api_base"] = base
@@ -248,11 +341,34 @@ def get_reports_backend_status():
     return None
 
 
+@st.cache_data(ttl=20)
+def get_reports_api_base_url(require_history: bool = False):
+    auth_headers = get_api_auth_headers()
+    for base in get_api_base_candidates():
+        try:
+            health = requests.get(f"{base}/healthz", timeout=2, headers=auth_headers)
+            if health.status_code != 200:
+                continue
+        except Exception:
+            continue
+
+        probe_path = "/api/reports/history" if require_history else "/api/reports/backend-status"
+        try:
+            probe = requests.get(f"{base}{probe_path}", params={"limit": 1}, timeout=2, headers=auth_headers)
+            # History can legitimately return 401/403 when auth is enabled.
+            if probe.status_code in {200, 401, 403, 422}:
+                return base
+        except Exception:
+            continue
+
+    return get_api_base_url()
+
+
 @st.cache_data(ttl=30)
 def get_backend_status():
     api_base = get_api_base_url()
     try:
-        resp = requests.get(f"{api_base}/healthz", timeout=2)
+        resp = requests.get(f"{api_base}/healthz", timeout=2, headers=get_api_auth_headers())
         if resp.status_code == 200:
             return {"ok": True, "api_base": api_base}
     except Exception:
@@ -268,6 +384,7 @@ def get_regions_from_api(source):
             f"{api_base}/v1/regions",
             params={"source": source},
             timeout=2,
+            headers=get_api_auth_headers(),
         )
         resp.raise_for_status()
         payload = resp.json()
@@ -293,6 +410,7 @@ def get_api_renewable_fraction(zone, start_date, end_date):
                 "end_date": str(end_date),
             },
             timeout=4,
+            headers=get_api_auth_headers(),
         )
         resp.raise_for_status()
         rows = resp.json()
@@ -401,6 +519,23 @@ def get_eia_total_states_from_facet():
     except Exception:
         return None
 
+
+def table_has_column(conn, table_name, column_name):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+              AND column_name = %s
+            LIMIT 1
+            """,
+            (table_name, column_name),
+        )
+        return cur.fetchone() is not None
+
+
 def fetch_generation_data(conn, country, start_dt, end_dt):
     api_client = EntsoEAPIClient()
     xml_data = api_client.get_actual_generation(country, start_dt, end_dt)
@@ -412,33 +547,62 @@ def fetch_generation_data(conn, country, start_dt, end_dt):
         return 0
 
     df["bidding_zone_mrid"] = api_client.BIDDING_ZONES.get(country, country)
-    df["quality_code"] = "A"
-    df["data_source"] = "ENTSOE_API"
 
-    records = df[[
-        "time",
-        "bidding_zone_mrid",
-        "psr_type",
-        "actual_generation_mw",
-        "quality_code",
-        "data_source",
-    ]].to_dict("records")
+    insert_columns = ["time", "bidding_zone_mrid", "psr_type", "actual_generation_mw"]
 
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur,
-            """
-            INSERT INTO generation_actual
-            (time, bidding_zone_mrid, psr_type, actual_generation_mw, quality_code, data_source)
-            VALUES (%(time)s, %(bidding_zone_mrid)s, %(psr_type)s, %(actual_generation_mw)s, %(quality_code)s, %(data_source)s)
-            ON CONFLICT (time, bidding_zone_mrid, psr_type)
-            DO UPDATE SET actual_generation_mw = EXCLUDED.actual_generation_mw
-            """,
-            records,
-            page_size=1000
-        )
-    conn.commit()
+    if table_has_column(conn, "generation_actual", "quality_code"):
+        df["quality_code"] = "A"
+        insert_columns.append("quality_code")
+    if table_has_column(conn, "generation_actual", "data_source"):
+        df["data_source"] = "ENTSOE_API"
+        insert_columns.append("data_source")
+
+    records = df[insert_columns].to_dict("records")
+    column_sql = ", ".join(insert_columns)
+    values_sql = ", ".join(f"%({column})s" for column in insert_columns)
+
+    try:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_batch(
+                cur,
+                f"""
+                INSERT INTO generation_actual
+                ({column_sql})
+                VALUES ({values_sql})
+                ON CONFLICT (time, bidding_zone_mrid, psr_type)
+                DO UPDATE SET actual_generation_mw = EXCLUDED.actual_generation_mw
+                """,
+                records,
+                page_size=1000,
+            )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+
     return len(records)
+
+
+def fetch_generation_via_api(zone, start_dt, end_dt):
+    api_url = get_api_base_url()
+    response = requests.post(
+        f"{api_url}/api/ingest/generation",
+        json={
+            "zone": zone,
+            "start": start_dt.isoformat(),
+            "end": end_dt.isoformat(),
+        },
+        timeout=60,
+        headers=get_api_auth_headers(),
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Fetch failed: {response.status_code} {response.text[:200]}")
+
+    payload = response.json()
+    return int(payload.get("rows_inserted", 0))
 
 def set_global_range(start_date, end_date):
     st.session_state["global_start"] = start_date
@@ -731,6 +895,9 @@ if backend_status["ok"]:
 else:
     st.sidebar.warning("FastAPI backend not reachable")
 
+if os.getenv("AUTH_BYPASS_DEV", "false").strip().lower() in {"1", "true", "yes", "on"}:
+    st.sidebar.warning("AUTH BYPASS ENABLED (dev mode only)")
+
 try:
     streamlit_port = int(st.get_option("server.port"))
 except Exception:
@@ -800,6 +967,14 @@ else:
     except Exception:
         coverage = {"min_date": None, "max_date": None, "monthly": pd.DataFrame()}
     eia_overview = {"ingested_states": 0, "total_rows": 0}
+
+global_scenario = st.sidebar.selectbox(
+    "Scenario",
+    ["Base Case", "High Renewable", "Grid Stress", "Custom"],
+    index=0,
+    key="global_scenario",
+    help="Shared scenario context used by AI report generation.",
+)
 
 # Global Date Range
 st.sidebar.subheader("Time Window")
@@ -942,11 +1117,22 @@ global_end = st.sidebar.date_input(
     max_value=max_bound
 )
 
+context_buffer = st.session_state.setdefault("context_buffer", {})
+context_buffer["zone"] = global_country
+context_buffer["scenario"] = global_scenario
+context_buffer["date_range"] = [str(global_start), str(global_end)]
+context_buffer["parameter_weights"] = SCENARIO_DEFAULT_WEIGHTS.get(
+    global_scenario,
+    SCENARIO_DEFAULT_WEIGHTS["Base Case"],
+)
+context_buffer["updated_at"] = datetime.utcnow().isoformat()
+
 st.sidebar.divider()
 st.sidebar.info(
     f"**Active Context**\n\n"
     f"Source: {'EIA' if is_eia_source else 'ENTSO-E'}\n\n"
     f"Region: {global_region}\n\n"
+    f"Scenario: {global_scenario}\n\n"
     f"Period: {(global_end - global_start).days} days"
 )
 if is_eia_source:
@@ -967,279 +1153,225 @@ st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 # ══════════════════════════════════════════════════════════════
 
 def render_ai_insights(zone):
+    session_ctx = _ensure_analysis_session()
+    update_session_context(
+        "ai_insights",
+        {
+            "zone": session_ctx.get("zone"),
+            "scenario": session_ctx.get("scenario"),
+            "date_range": session_ctx.get("date_range"),
+        },
+    )
+
     st.markdown("# AI Insights")
-    st.markdown(
-        "Generate weighted market narratives from local grid conditions. "
-        "Use scenario presets or custom weights to steer LLM attention."
+    st.markdown("Generate narrative reports from the full dashboard analysis context.")
+    st.info(
+        f"""**Current Analysis Session**
+- Zone: {session_ctx.get('zone', 'DE')}
+- Scenario: {session_ctx.get('scenario', 'Base Case')}
+- Date range: {session_ctx.get('date_range') or 'Not set'}
+- Tabs visited: {', '.join(session_ctx.get('visited_tabs', [])) or 'None yet'}
+
+Navigate to other tabs first to build richer context for report generation."""
+    )
+
+    persona_map = {
+        "trader": "Power Trader",
+        "operator": "Grid Operator",
+        "ev_owner": "EV Owner",
+        "policymaker": "Policy Analyst",
+    }
+    persona = st.selectbox(
+        "Analysis Perspective",
+        options=list(persona_map.keys()),
+        format_func=lambda value: persona_map[value],
+        key="ai_insights_persona_contextual",
     )
 
     reports_backend_status = get_reports_backend_status()
     api_base = get_api_base_url()
     backend_choice = None
+    model_choice = None
+    selected_backend_option = None
     backend_labels = {}
+    backend_options = []
 
     st.sidebar.subheader("LLM Backend")
     if reports_backend_status:
-        available = reports_backend_status.get("available_backends", [])
-        current = reports_backend_status.get("backend", "fallback")
+        current_backend = reports_backend_status.get("active_backend") or reports_backend_status.get("backend", "fallback")
         api_base = reports_backend_status.get("api_base", api_base)
+        available_entries = reports_backend_status.get("available_backends", [])
 
-        backend_options = []
-        if "openai" in available:
-            model = reports_backend_status.get("openai_model") or "gpt-4o-mini"
-            backend_options.append("openai")
-            backend_labels["openai"] = f"OpenAI ({model})"
-        if "ollama" in available:
-            model = reports_backend_status.get("ollama_model") or "local"
-            backend_options.append("ollama")
-            backend_labels["ollama"] = f"Ollama ({model})"
-        if "huggingface" in available:
-            model = reports_backend_status.get("hf_model") or "local"
-            backend_options.append("huggingface")
-            backend_labels["huggingface"] = f"HuggingFace ({model})"
+        if available_entries and isinstance(available_entries[0], dict):
+            for entry in available_entries:
+                backend_type = str(entry.get("type", "")).strip().lower()
+                if not backend_type:
+                    continue
+                models = entry.get("models") or [None]
+                for model in models:
+                    model_name = str(model).strip() if model is not None else ""
+                    option = f"{backend_type}:{model_name}" if model_name else backend_type
+                    if option in backend_labels:
+                        continue
+                    backend_options.append(option)
+                    backend_labels[option] = f"{backend_type.upper()}: {model_name}" if model_name else backend_type.upper()
 
         if not backend_options:
-            st.sidebar.error("No LLM backends available")
-            st.sidebar.markdown(
-                """
-Setup options:
+            backend_options = ["fallback:template"]
+            backend_labels["fallback:template"] = "FALLBACK: template"
 
-1. OpenAI
-`OPENAI_API_KEY=sk-proj-...`
-
-2. Ollama
-`ollama pull phi3:mini`
-
-3. HuggingFace
-`poetry install --extras llm`
-"""
-            )
+        if "ai_backend_choice" in st.session_state and st.session_state["ai_backend_choice"] in backend_options:
+            default_index = backend_options.index(st.session_state["ai_backend_choice"])
         else:
-            if "ai_backend_choice" in st.session_state and st.session_state["ai_backend_choice"] in backend_options:
-                default_index = backend_options.index(st.session_state["ai_backend_choice"])
-            elif current in backend_options:
-                default_index = backend_options.index(current)
-            else:
-                default_index = 0
+            default_index = 0
+            for idx, option in enumerate(backend_options):
+                if option == current_backend or option.startswith(f"{current_backend}:"):
+                    default_index = idx
+                    break
 
-            backend_choice = st.sidebar.radio(
-                "Select backend:",
-                options=backend_options,
-                index=default_index,
-                format_func=lambda option: backend_labels[option],
-                key="ai_backend_choice",
-            )
-
-            if backend_choice == "openai":
-                st.sidebar.info("Fast generation (~5-10s)\nLow per-report API cost.")
-            elif backend_choice == "ollama":
-                st.sidebar.info("Runs locally at no API cost.\nTypical latency: ~30-60s.")
-            elif backend_choice == "huggingface":
-                st.sidebar.info("Runs locally with transformers.\nTypical latency: ~60-180s.")
-    else:
-        st.sidebar.error("Cannot reach reports backend status endpoint.")
-        st.warning(
-            "Reports backend was not discovered on default local ports. "
-            "Set CYGNET_API_URL to the FastAPI base URL if needed."
+        selected_backend_option = st.sidebar.radio(
+            "Select backend:",
+            options=backend_options,
+            index=default_index,
+            format_func=lambda option: backend_labels[option],
+            key="ai_backend_choice",
         )
+        backend_choice, _, model_name = selected_backend_option.partition(":")
+        model_choice = model_name or None
+        if backend_choice == "fallback" and model_choice == "template":
+            model_choice = None
+    else:
+        st.warning("Reports backend status endpoint is unavailable.")
 
     st.caption(f"Reports API: {api_base}")
-    if backend_choice:
-        st.info(f"Selected backend: {backend_labels[backend_choice]}")
+    if selected_backend_option:
+        st.caption(f"Selected backend: {backend_labels[selected_backend_option]}")
 
-    scenario_weights = {
-        "Base Case": {"price": 0.4, "renewable_share": 0.2, "margin": 0.2, "carbon": 0.2},
-        "High Renewable": {"renewable_share": 0.5, "carbon": 0.3, "price": 0.1, "margin": 0.1},
-        "Grid Stress": {"margin": 0.5, "price": 0.3, "renewable_share": 0.1, "carbon": 0.1},
-    }
-
-    st.header("1. Select Analysis Scenario")
-    scenario = st.radio(
-        "Choose your market focus:",
-        options=["Base Case", "High Renewable", "Grid Stress", "Custom"],
-        key="ai_insights_scenario",
-        help="Scenario presets define default parameter attention weights for the report.",
-        horizontal=True,
-    )
-
-    st.header("2. Select Market Parameters")
-    today = datetime.utcnow().date()
-    default_end = today + timedelta(days=7)
-
-    default_zone = str(zone).strip().upper() if zone else "DE"
-    zone_options = [default_zone]
-    for candidate in ["DE", "FR", "NL", "BE"]:
-        if candidate not in zone_options:
-            zone_options.append(candidate)
-
-    persona_map = {
-        "Trader": "trader",
-        "Grid Operator": "operator",
-        "Policy Analyst": "policymaker",
-    }
-
-    col1, col2 = st.columns(2)
-    with col1:
-        selected_zone = st.selectbox(
-            "Bidding Zone",
-            options=zone_options,
-            key="ai_insights_zone",
-        )
-        selected_range = st.date_input(
-            "Analysis Period",
-            value=(today, default_end),
-            key="ai_insights_date_range",
-        )
-    with col2:
-        persona_label = st.selectbox(
-            "Analysis Perspective",
-            options=list(persona_map.keys()),
-            key="ai_insights_persona",
-            help="Changes report framing and recommended actions.",
-        )
-        persona = persona_map[persona_label]
-
-    if isinstance(selected_range, tuple):
-        range_values = list(selected_range)
-    elif isinstance(selected_range, list):
-        range_values = selected_range
-    else:
-        range_values = [selected_range]
-
-    if not range_values:
-        range_values = [today, default_end]
-    if len(range_values) == 1:
-        range_values = [range_values[0], range_values[0] + timedelta(days=1)]
-
-    range_values = sorted(range_values[:2])
-    date_range = [item.isoformat() for item in range_values]
-
-    if scenario == "Custom":
-        st.subheader("Adjust Parameter Importance")
-        st.caption("Weights are normalized and passed to the backend for weighted prompt construction.")
-        price_weight = st.slider("Price Sensitivity", 0.0, 1.0, 0.25, 0.05, key="ai_weight_price")
-        renewable_weight = st.slider(
-            "Renewable Share Focus", 0.0, 1.0, 0.25, 0.05, key="ai_weight_renewable"
-        )
-        margin_weight = st.slider("Reserve Margin Importance", 0.0, 1.0, 0.25, 0.05, key="ai_weight_margin")
-        carbon_weight = st.slider("Carbon Intensity Focus", 0.0, 1.0, 0.25, 0.05, key="ai_weight_carbon")
-        total_weight = price_weight + renewable_weight + margin_weight + carbon_weight
-        if total_weight <= 0:
-            weights = {"price": 0.25, "renewable_share": 0.25, "margin": 0.25, "carbon": 0.25}
-            st.warning("All custom weights were zero. Using equal weighting.")
-        else:
-            weights = {
-                "price": price_weight / total_weight,
-                "renewable_share": renewable_weight / total_weight,
-                "margin": margin_weight / total_weight,
-                "carbon": carbon_weight / total_weight,
-            }
-    else:
-        weights = scenario_weights[scenario]
-
-    st.header("3. Generate AI Insights")
     if not backend_choice:
-        st.warning("No LLM backend is currently available. Use the sidebar setup instructions.")
+        st.warning("No backend available. Check API backend status.")
         return
 
-    if st.button("Run Analysis", type="primary", use_container_width=True, key="ai_insights_generate"):
+    if st.button("Generate Report", type="primary", use_container_width=True, key="ai_insights_generate"):
         report_request = {
             "persona": persona,
-            "zone": selected_zone,
-            "date_range": date_range,
-            "scenario": scenario,
-            "parameter_weights": weights,
             "backend": backend_choice,
+            "save_history": True,
+            "session_context": session_ctx,
         }
-        timeout_seconds = 60 if backend_choice == "openai" else 200
+        if model_choice:
+            report_request["model"] = model_choice
 
-        with st.spinner(f"Analyzing market data with {backend_labels[backend_choice]}..."):
+        timeout_seconds = 60 if backend_choice == "openai" else 200
+        with st.spinner("Analyzing session context..."):
             try:
                 response = requests.post(
                     f"{api_base}/api/reports/generate",
                     json=report_request,
                     timeout=timeout_seconds,
+                    headers=get_api_auth_headers(),
                 )
-            except requests.Timeout:
-                st.error(f"Analysis timed out after {timeout_seconds} seconds.")
-                st.caption("Try a different backend or smaller date range.")
-                return
             except Exception as exc:
-                st.error("Report request failed.")
-                st.caption(f"Error: {exc}")
+                st.error(f"Report request failed: {exc}")
                 return
-
-        if response.status_code == 405:
-            legacy_params = {
-                "persona": persona,
-                "zone": selected_zone,
-                "current_soc": 35,
-                "tight_margin_mw": 1500,
-            }
-            try:
-                legacy_response = requests.get(
-                    f"{api_base}/api/reports/generate",
-                    params=legacy_params,
-                    timeout=200,
-                )
-                if legacy_response.status_code == 200:
-                    response = legacy_response
-                    st.warning(
-                        "Connected API is using the legacy reports route. "
-                        "Scenario weights and backend override were not applied for this request."
-                    )
-                else:
-                    response = legacy_response
-            except Exception as exc:
-                st.error("Legacy report fallback failed.")
-                st.caption(f"Error: {exc}")
-                return
-
-        if response.status_code == 404:
-            for alt_base in get_api_base_candidates():
-                if alt_base == api_base:
-                    continue
-                try:
-                    retry = requests.post(
-                        f"{alt_base}/api/reports/generate",
-                        json=report_request,
-                        timeout=timeout_seconds,
-                    )
-                except Exception:
-                    continue
-                if retry.status_code != 404:
-                    response = retry
-                    api_base = alt_base
-                    st.caption(f"Retried report request against {api_base}.")
-                    break
 
         if response.status_code != 200:
             st.error(f"Report generation failed ({response.status_code}).")
             st.caption(response.text)
-            if response.status_code == 401:
-                st.caption("Enable AUTH_BYPASS_DEV=true for local development without bearer tokens.")
             return
 
         report = response.json()
         st.success(f"Analysis complete ({report.get('backend', backend_choice)}).")
-        st.subheader(f"Report for {persona_label}")
+        if report.get("session_id"):
+            session_ctx["session_id"] = report["session_id"]
+        if report.get("report_id"):
+            st.success(f"Report saved (ID: {report['report_id'][:8]}...)")
+
+        st.markdown("### Analysis Report")
         st.markdown(report.get("narrative", "No narrative returned."))
 
-        with st.expander("Analysis context"):
-            st.json(
-                {
-                    "scenario": report.get("scenario", scenario),
-                    "date_range": report.get("date_range", date_range),
-                    "parameter_weights": report.get("parameter_weights", weights),
-                }
-            )
+        with st.expander("Analysis context used"):
+            st.json(session_ctx)
+        with st.expander("Data summary"):
             st.json(report.get("data_summary", {}))
 
-        backend = report.get("backend")
-        if report.get("llm_available"):
-            st.success(f"Generated using backend: {backend}")
-        else:
-            st.warning("LLM backend unavailable. Displaying fallback summary.")
+
+def render_report_history():
+    session_ctx = _ensure_analysis_session()
+    update_session_context("report_history", {"session_id": session_ctx.get("session_id")})
+    st.markdown("# Report History")
+
+    api_base = get_reports_api_base_url(require_history=True)
+    auth_headers = get_api_auth_headers()
+    session_id = session_ctx.get("session_id")
+    st.caption(f"Session: {session_id}")
+
+    try:
+        response = requests.get(
+            f"{api_base}/api/reports/history",
+            params={"session_id": session_id, "limit": 100},
+            timeout=5,
+            headers=auth_headers,
+        )
+        if response.status_code == 404:
+            st.error("Report History endpoint is unavailable on the running API instance.")
+            st.caption("Restart API on the latest code: `./stop_local.sh` then `./start_local.sh`.")
+            return
+        response.raise_for_status()
+        reports = response.json().get("reports", [])
+    except Exception as exc:
+        st.error("Failed to load history.")
+        st.caption(f"Error: {exc}")
+        return
+
+    if not reports:
+        st.info("No reports yet. Generate your first report in AI Insights.")
+        return
+
+    for report in reports:
+        timestamp = str(report.get("generated_at", ""))[:16].replace("T", " ")
+        label = f"{report.get('persona', 'n/a').title()} | {report.get('zone', 'n/a')} | {timestamp}"
+
+        with st.expander(label):
+            try:
+                full_resp = requests.get(
+                    f"{api_base}/api/reports/history/{report['report_id']}",
+                    timeout=5,
+                    headers=auth_headers,
+                )
+                full_resp.raise_for_status()
+                full = full_resp.json()
+            except Exception as exc:
+                st.error(f"Failed to load report details: {exc}")
+                continue
+
+            st.markdown(full.get("narrative", "No narrative available."))
+            with st.expander("Context + data summary"):
+                st.json(full.get("data_summary", {}))
+
+            col1, col2 = st.columns(2)
+            with col1:
+                is_favorite = bool(full.get("is_favorite", False))
+                label = "★ Unfavorite" if is_favorite else "☆ Favorite"
+                if st.button(label, key=f"fav_{report['report_id']}"):
+                    try:
+                        patch_resp = requests.patch(
+                            f"{api_base}/api/reports/history/{report['report_id']}",
+                            json={"is_favorite": not is_favorite},
+                            timeout=5,
+                            headers=auth_headers,
+                        )
+                        patch_resp.raise_for_status()
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Failed to update favorite: {exc}")
+            with col2:
+                st.download_button(
+                    "Download JSON",
+                    data=json.dumps(full, indent=2, default=str),
+                    file_name=f"report_{report['report_id'][:8]}.json",
+                    mime="application/json",
+                    key=f"download_{report['report_id']}",
+                )
 
 
 def render_overview(country, coverage):
@@ -1516,6 +1648,17 @@ def render_carbon_intelligence(default_country):
             horizontal=True,
         )
 
+    update_session_context(
+        "carbon",
+        {
+            "default_country": default_country,
+            "selected_countries": selected_countries,
+            "view_mode": view_mode,
+            "date_range": _ensure_analysis_session().get("date_range"),
+        },
+        charts=["carbon_intensity_comparison" if view_mode == "Comparison" else "carbon_intensity_forecast"],
+    )
+
     st.divider()
 
     # ══════════════════════════════════════════════════════════════
@@ -1644,6 +1787,16 @@ def render_carbon_intelligence(default_country):
     # ══════════════════════════════════════════════════════════════
     else:
         country = selected_countries[0] if selected_countries else default_country
+        update_session_context(
+            "carbon",
+            {
+                "country": country,
+                "selected_countries": selected_countries,
+                "view_mode": view_mode,
+                "date_range": _ensure_analysis_session().get("date_range"),
+            },
+            charts=["carbon_generation_mix", "carbon_forecast_24h", "ev_optimizer"],
+        )
 
         # The Carbon Paradox Expander
         with st.expander("The Carbon Paradox - Why This Matters", expanded=False):
@@ -1987,6 +2140,14 @@ def render_generation_analytics(country, start_date, end_date):
 
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
+    update_session_context(
+        "generation",
+        {
+            "zone": country,
+            "date_range": [str(start_date), str(end_date)],
+            "mode": "initial",
+        },
+    )
 
     try:
         conn = get_db()
@@ -1994,25 +2155,100 @@ def render_generation_analytics(country, start_date, end_date):
         render_db_error("Generation Analytics", exc)
         return
 
+    def resolve_generation_table(_conn, zone, start, end):
+        zone_keys = get_zone_keys(zone)
+        with _conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'generation_actual'
+                ),
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'generation_records'
+                )
+                """
+            )
+            has_actual, has_records = cur.fetchone()
+
+            if has_actual:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM generation_actual
+                    WHERE bidding_zone_mrid = ANY(%s)
+                      AND time >= %s
+                      AND time < %s
+                    """,
+                    (zone_keys, start, end),
+                )
+                if int(cur.fetchone()[0] or 0) > 0:
+                    return "generation_actual"
+
+            if has_records:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM generation_records
+                    WHERE zone = %s
+                      AND timestamp >= %s
+                      AND timestamp < %s
+                    """,
+                    (zone, start, end),
+                )
+                if int(cur.fetchone()[0] or 0) > 0:
+                    return "generation_records"
+
+            if has_actual:
+                return "generation_actual"
+            if has_records:
+                return "generation_records"
+            return "generation_actual"
+
+    generation_table = resolve_generation_table(conn, country, start_dt, end_dt)
+
     # Load generation data
     @st.cache_data(ttl=600)
     def load_generation_data(_conn, zone, start, end):
+        logger.info("load_generation_data: table=%s zone=%s start=%s end=%s", generation_table, zone, start, end)
         zone_keys = get_zone_keys(zone)
-        cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
+        params = (zone_keys, start, end) if generation_table == "generation_actual" else (zone, start, end)
+        query = (
             """
             SELECT time, psr_type, actual_generation_mw
             FROM generation_actual
             WHERE bidding_zone_mrid = ANY(%s)
               AND time >= %s
-              AND time <= %s
-              AND quality_code = 'A'
+              AND time < %s
             ORDER BY time, psr_type
-            """,
-            (zone_keys, start, end)
+            """
+            if generation_table == "generation_actual"
+            else """
+            SELECT timestamp AS time, source AS psr_type, quantity AS actual_generation_mw
+            FROM generation_records
+            WHERE zone = %s
+              AND timestamp >= %s
+              AND timestamp < %s
+            ORDER BY timestamp, source
+            """
         )
-        rows = cur.fetchall()
-        cur.close()
+        cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            logger.info("load_generation_data: %s rows returned", len(rows))
+        except Exception:
+            logger.exception("load_generation_data failed")
+            try:
+                _conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            cur.close()
         if not rows:
             return pd.DataFrame()
         return pd.DataFrame([dict(row) for row in rows])
@@ -2021,8 +2257,8 @@ def render_generation_analytics(country, start_date, end_date):
     @st.cache_data(ttl=600)
     def load_renewable_fraction(_conn, zone, start, end):
         zone_keys = get_zone_keys(zone)
-        cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
+        params = (zone_keys, start, end) if generation_table == "generation_actual" else (zone, start, end)
+        query = (
             """
             SELECT
                 SUM(CASE WHEN psr_type IN ('B01', 'B17', 'B18', 'B19', 'B20')
@@ -2033,13 +2269,35 @@ def render_generation_analytics(country, start_date, end_date):
             FROM generation_actual
             WHERE bidding_zone_mrid = ANY(%s)
               AND time >= %s
-              AND time <= %s
-              AND quality_code = 'A'
-            """,
-            (zone_keys, start, end)
+              AND time < %s
+            """
+            if generation_table == "generation_actual"
+            else """
+            SELECT
+                SUM(CASE WHEN source IN ('B01', 'B17', 'B18', 'B19', 'B20')
+                    THEN quantity ELSE 0 END) as renewable_gen,
+                SUM(CASE WHEN source NOT IN ('B01', 'B17', 'B18', 'B19', 'B20')
+                    THEN quantity ELSE 0 END) as fossil_gen,
+                SUM(quantity) as total_gen
+            FROM generation_records
+            WHERE zone = %s
+              AND timestamp >= %s
+              AND timestamp < %s
+            """
         )
-        result = cur.fetchone()
-        cur.close()
+        cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute(query, params)
+            result = cur.fetchone()
+        except Exception:
+            logger.exception("load_renewable_fraction failed")
+            try:
+                _conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            cur.close()
         return dict(result) if result else {}
 
     df = load_generation_data(conn, country, start_dt, end_dt)
@@ -2054,9 +2312,14 @@ def render_generation_analytics(country, start_date, end_date):
         with col_fetch:
             if st.button("Fetch from ENTSO-E API for this period", key="fetch_gen_analytics"):
                 with st.spinner("Fetching live data and storing in the database..."):
-                    inserted = fetch_generation_data(conn, country, start_dt, end_dt)
+                    try:
+                        inserted = fetch_generation_via_api(country, start_dt, end_dt)
+                    except Exception as exc:
+                        st.error(str(exc))
+                        inserted = 0
                 if inserted > 0:
-                    st.success(f"Inserted {inserted:,} rows. Reloading view...")
+                    st.success(f"Fetched {inserted:,} records")
+                    st.cache_data.clear()
                     st.rerun()
                 else:
                     st.warning("No data returned for this range. Try a shorter window.")
@@ -2291,6 +2554,23 @@ def render_generation_analytics(country, start_date, end_date):
         )
 
     source_label = "Demo (synthetic)" if demo_mode else "ENTSO-E"
+    update_session_context(
+        "generation",
+        {
+            "zone": country,
+            "date_range": [str(start_date), str(end_date)],
+            "rows": int(len(df)),
+            "demo_mode": demo_mode,
+            "renewable_pct": round(float(renewable_pct), 2),
+            "total_generation_mwh": round(float(total_gen), 2),
+        },
+        charts=[
+            "generation_time_series",
+            "generation_energy_mix",
+            "generation_daily_patterns",
+            "generation_renewable_fraction_api",
+        ],
+    )
     st.caption(f"Data Source: {source_label} | Zone: {country} | Rows: {len(df):,}")
 
 
@@ -2416,6 +2696,52 @@ direction and magnitude, not absolute price, as the insight.
         conn = get_db()
     except Exception as exc:
         render_db_error("Grid Regimes & Stress Testing", exc)
+        return
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'regime_states'
+                )
+                """
+            )
+            has_regime_states = bool(cur.fetchone()[0])
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        has_regime_states = False
+
+    if not has_regime_states:
+        st.info(
+            "No regime data available yet (`public.regime_states` table is missing). "
+            "Run the regime computation pipeline first."
+        )
+        if st.button("Show demo regime snapshot", key="demo_regime_table_missing"):
+            st.subheader("Current Operating Regime (Demo)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Regime", "Balanced")
+            c2.metric("Confidence", "0.65")
+            c3.metric("RES Penetration", "41.2%")
+            c4.metric("Net Import", "620 MW")
+            st.markdown("### Driver Snapshot (Demo)")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"driver": "Wind rebound", "impact": "High"},
+                        {"driver": "Interconnect easing", "impact": "Medium"},
+                        {"driver": "Price volatility", "impact": "Low"},
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
         return
 
     # Latest regime state
@@ -2733,6 +3059,15 @@ direction and magnitude, not absolute price, as the insight.
 def render_data_explorer(country, start_date, end_date):
     st.markdown("# Data Explorer")
     st.markdown("### Database Connectivity and Query Testing")
+    update_session_context(
+        "load",
+        {
+            "zone": country,
+            "date_range": [str(start_date), str(end_date)],
+            "source": "generation_actual/load_actual explorer",
+        },
+        charts=["data_explorer_samples"],
+    )
 
     try:
         conn = get_db()
@@ -2825,6 +3160,17 @@ def render_data_explorer(country, start_date, end_date):
         with col3:
             st.metric("Date Range", f"{(end_date - start_date).days} days")
 
+        update_session_context(
+            "load",
+            {
+                "zone": country,
+                "date_range": [str(start_date), str(end_date)],
+                "total_records": int(total_count),
+                "records_in_range": int(range_count),
+            },
+            charts=["data_explorer_samples"],
+        )
+
         st.divider()
         st.caption(f"Selected range: {start_date} → {end_date}")
 
@@ -2845,9 +3191,14 @@ def render_data_explorer(country, start_date, end_date):
             with col_fetch:
                 if st.button("Fetch from ENTSO-E API for this period", key="fetch_data_explorer"):
                     with st.spinner("Fetching live data and storing in the database..."):
-                        inserted = fetch_generation_data(conn, country, start_dt, end_dt)
+                        try:
+                            inserted = fetch_generation_via_api(country, start_dt, end_dt)
+                        except Exception as exc:
+                            st.error(str(exc))
+                            inserted = 0
                     if inserted > 0:
-                        st.success(f"Inserted {inserted:,} rows. Reloading view...")
+                        st.success(f"Fetched {inserted:,} records")
+                        st.cache_data.clear()
                         st.rerun()
                     else:
                         st.warning("No data returned for this range. Try a shorter window.")
@@ -2914,6 +3265,15 @@ def render_data_explorer(country, start_date, end_date):
 def render_eia_retail_prices(default_state=None, start_date=None, end_date=None):
     st.markdown("# EIA Retail Prices")
     st.markdown("US state-level retail electricity prices from `canonical_metrics`.")
+    update_session_context(
+        "price",
+        {
+            "default_state": default_state,
+            "date_range": [str(start_date) if start_date else None, str(end_date) if end_date else None],
+            "source": "EIA canonical_metrics",
+        },
+        charts=["eia_retail_price_trend"],
+    )
 
     try:
         conn = get_db()
@@ -2982,6 +3342,18 @@ def render_eia_retail_prices(default_state=None, start_date=None, end_date=None)
     if eia_df.empty:
         st.warning("No rows in selected filter.")
         return
+
+    update_session_context(
+        "price",
+        {
+            "state": state,
+            "month_start": start_month,
+            "month_end": end_month,
+            "rows": int(len(eia_df)),
+            "latest_price_usd_mwh": round(float(eia_df["retail_price_usd_mwh"].iloc[-1]), 4),
+        },
+        charts=["eia_retail_price_trend"],
+    )
 
     total_states = get_eia_total_states_from_facet()
     ingested_states = get_eia_ingestion_overview(conn).get("ingested_states", 0)
@@ -3294,6 +3666,7 @@ if is_eia_source:
 else:
     sections = [
         "AI Insights",
+        "Report History",
         "Overview",
         "Carbon Intelligence",
         "Generation Analytics",
@@ -3302,7 +3675,17 @@ else:
         "Technical Info",
         "Health & Setup",
     ]
-section = st.sidebar.radio("Navigate", sections, key="section")
+if st.session_state.get("active_page") not in sections:
+    st.session_state["active_page"] = sections[0]
+section = st.sidebar.radio("Navigate", sections, key="active_page")
+update_session_context(
+    section.lower().replace(" ", "_"),
+    {
+        "zone": global_country,
+        "scenario": global_scenario,
+        "date_range": [str(global_start), str(global_end)],
+    },
+)
 
 if section == "Overview":
     if is_eia_source:
@@ -3311,6 +3694,8 @@ if section == "Overview":
         render_overview(global_country, coverage)
 elif section == "AI Insights":
     render_ai_insights(global_country)
+elif section == "Report History":
+    render_report_history()
 elif section == "Carbon Intelligence":
     render_carbon_intelligence(global_country)
 elif section == "Generation Analytics":

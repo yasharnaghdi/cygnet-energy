@@ -51,8 +51,10 @@ class FakeLLM:
         temperature: float = 0.7,
         max_tokens: int = 320,
         force_backend: str | None = None,
+        force_model: str | None = None,
     ) -> str:
         self.last_force_backend = force_backend
+        self.last_force_model = force_model
         return self._text
 
     def get_backend_info(self) -> dict[str, Any]:
@@ -175,6 +177,32 @@ def test_reports_generate_passes_backend_override(monkeypatch) -> None:
     assert payload["llm_available"] is True
 
 
+def test_reports_generate_passes_model_override(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_BYPASS_DEV", "true")
+    monkeypatch.setattr(reports, "get_connection", lambda: DummyConnection(_sample_rows(48)))
+    fake_llm = FakeLLM("ollama", "Synthetic report from Ollama.")
+    monkeypatch.setattr(reports, "get_llm", lambda: fake_llm)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/reports/generate",
+        json={
+            "persona": "trader",
+            "zone": "DE",
+            "scenario": "Base Case",
+            "date_range": ["2026-02-16", "2026-02-23"],
+            "backend": "ollama",
+            "model": "phi3:mini",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert fake_llm.last_force_backend == "ollama"
+    assert fake_llm.last_force_model == "phi3:mini"
+    assert payload["backend_info"]["requested_model"] == "phi3:mini"
+
+
 def test_reports_generate_with_fallback_backend(monkeypatch) -> None:
     monkeypatch.setenv("AUTH_BYPASS_DEV", "true")
     monkeypatch.setattr(reports, "get_connection", lambda: DummyConnection(_sample_rows(72)))
@@ -267,3 +295,53 @@ def test_reports_generate_normalizes_custom_parameter_weights(monkeypatch) -> No
     assert payload["scenario"] == "Custom"
     assert sum(payload["parameter_weights"].values()) == pytest.approx(1.0, abs=1e-9)
     assert payload["parameter_weights"]["price"] == pytest.approx(0.7, abs=1e-9)
+
+
+def test_reports_generate_uses_session_context_values(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_BYPASS_DEV", "true")
+    monkeypatch.setattr(reports, "get_connection", lambda: DummyConnection(_sample_rows(48)))
+    monkeypatch.setattr(reports, "get_llm", lambda: FakeLLM("fallback", "Context-aware report."))
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/reports/generate",
+        json={
+            "persona": "trader",
+            "zone": "FR",
+            "scenario": "Base Case",
+            "date_range": ["2026-02-01", "2026-02-02"],
+            "save_history": False,
+            "session_context": {
+                "session_id": "session-ctx-123",
+                "zone": "DE",
+                "scenario": "Grid Stress",
+                "date_range": ["2026-02-10", "2026-02-12"],
+                "parameter_weights": {"price": 0.5, "renewable_share": 0.2, "margin": 0.2, "carbon": 0.1},
+                "visited_tabs": ["generation", "load", "carbon", "price"],
+                "generated_charts": ["generation_mix_area", "load_curve", "carbon_trend", "price_trend"],
+                "generation_params": {"zone": "DE", "renewable_pct": 51.2},
+                "load_params": {"peak_hour": 18, "peak_mw": 61200},
+                "carbon_params": {"avg_intensity": 243.1},
+                "price_params": {"latest_price": 101.4},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scenario"] == "Grid Stress"
+    assert payload["date_range"] == ["2026-02-10", "2026-02-12"]
+    assert payload["parameter_weights"]["price"] == pytest.approx(0.5, abs=1e-9)
+    assert payload["data_summary"]["zone"] == "DE"
+    assert payload["data_summary"]["session_id"] == "session-ctx-123"
+    assert payload["data_summary"]["visited_tabs"] == ["generation", "load", "carbon", "price"]
+    assert payload["data_summary"]["generated_charts"] == [
+        "generation_mix_area",
+        "load_curve",
+        "carbon_trend",
+        "price_trend",
+    ]
+    assert payload["data_summary"]["generation_context"] == {"zone": "DE", "renewable_pct": 51.2}
+    assert payload["data_summary"]["load_context"] == {"peak_hour": 18, "peak_mw": 61200}
+    assert payload["data_summary"]["carbon_context"] == {"avg_intensity": 243.1}
+    assert payload["data_summary"]["price_context"] == {"latest_price": 101.4}
