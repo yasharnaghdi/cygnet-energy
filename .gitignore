@@ -5,12 +5,15 @@ __pycache__/
 venv/
 *.egg-info/
 .env
+.env.docker
 .env.local
 !.env.example
+!.env.docker.example
 config/secrets.yaml
 config/certs/
 logs/
 *.log
+*.pid
 .DS_Store
 *.sqlite
 .idea/

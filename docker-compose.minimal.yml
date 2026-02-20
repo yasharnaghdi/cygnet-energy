@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: cygnet-postgres-only
+    environment:
+      POSTGRES_USER: cygnet
+      POSTGRES_PASSWORD: cygnet_pass
+      POSTGRES_DB: energy_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cygnet -d energy_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

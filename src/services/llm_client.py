@@ -129,6 +129,32 @@ class UnifiedLLMClient:
         self.hf_model_name = os.getenv("HF_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
         return find_spec("transformers") is not None and find_spec("torch") is not None
 
+    def _has_gpu(self) -> bool:
+        try:
+            import torch
+
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
+
+    def _get_ollama_models(self) -> list[str]:
+        try:
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=2)
+            response.raise_for_status()
+            payload = response.json()
+            models = payload.get("models", [])
+            names = []
+            for model in models:
+                if isinstance(model, dict):
+                    name = str(model.get("name", "")).strip()
+                    if name:
+                        names.append(name)
+            if names:
+                return names
+        except Exception:
+            pass
+        return [self.ollama_model]
+
     def _load_hf_model(self) -> None:
         if self.hf_model is not None and self.hf_tokenizer is not None:
             return
@@ -163,6 +189,7 @@ class UnifiedLLMClient:
         temperature: float = 0.7,
         max_tokens: int = 320,
         force_backend: BackendType | None = None,
+        force_model: str | None = None,
     ) -> str:
         if force_backend is not None:
             requested_backend = LLMBackend(force_backend)
@@ -173,13 +200,19 @@ class UnifiedLLMClient:
                 prompt=prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                model_override=force_model,
             )
             if text:
                 return text
             raise RuntimeError(f"{requested_backend.value} generation failed.")
 
         if self.backend == LLMBackend.OLLAMA:
-            text = self._generate_ollama(prompt, temperature=temperature, max_tokens=max_tokens)
+            text = self._generate_ollama(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model_override=force_model,
+            )
             if text:
                 return text
             if self._check_huggingface():
@@ -190,7 +223,12 @@ class UnifiedLLMClient:
                 self.backend = LLMBackend.FALLBACK
 
         if self.backend == LLMBackend.HUGGINGFACE:
-            text = self._generate_huggingface(prompt, temperature=temperature, max_tokens=max_tokens)
+            text = self._generate_huggingface(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model_override=force_model,
+            )
             if text:
                 return text
             if self._check_openai():
@@ -200,7 +238,12 @@ class UnifiedLLMClient:
 
         if self.backend == LLMBackend.OPENAI:
             try:
-                text = self._generate_openai(prompt, temperature=temperature, max_tokens=max_tokens)
+                text = self._generate_openai(
+                    prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    model_override=force_model,
+                )
                 if text:
                     return text
             except Exception as exc:
@@ -210,20 +253,43 @@ class UnifiedLLMClient:
         return self._generate_fallback(prompt)
 
     def _generate_with_backend(
-        self, backend: LLMBackend, prompt: str, temperature: float, max_tokens: int
+        self,
+        backend: LLMBackend,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        model_override: str | None = None,
     ) -> str | None:
         if backend == LLMBackend.OPENAI:
-            return self._generate_openai(prompt, temperature=temperature, max_tokens=max_tokens)
+            return self._generate_openai(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model_override=model_override,
+            )
         if backend == LLMBackend.OLLAMA:
-            return self._generate_ollama(prompt, temperature=temperature, max_tokens=max_tokens)
+            return self._generate_ollama(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model_override=model_override,
+            )
         if backend == LLMBackend.HUGGINGFACE:
-            return self._generate_huggingface(prompt, temperature=temperature, max_tokens=max_tokens)
+            return self._generate_huggingface(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model_override=model_override,
+            )
         return self._generate_fallback(prompt)
 
-    def _generate_openai(self, prompt: str, temperature: float, max_tokens: int) -> str:
+    def _generate_openai(
+        self, prompt: str, temperature: float, max_tokens: int, model_override: str | None = None
+    ) -> str:
         if self.openai_client is None and not self._check_openai():
             raise ValueError("OpenAI is not configured. Set OPENAI_API_KEY in .env")
 
+        selected_model = model_override or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         env_max_tokens = os.getenv("OPENAI_MAX_TOKENS")
         env_temperature = os.getenv("OPENAI_TEMPERATURE")
         final_max_tokens = max_tokens
@@ -242,7 +308,7 @@ class UnifiedLLMClient:
                 logger.warning("Invalid OPENAI_TEMPERATURE=%s. Using %s.", env_temperature, temperature)
 
         response = self.openai_client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            model=selected_model,
             messages=[
                 {"role": "system", "content": "You are an energy market analyst."},
                 {"role": "user", "content": prompt},
@@ -254,12 +320,19 @@ class UnifiedLLMClient:
         content = response.choices[0].message.content
         return (content or "").strip()
 
-    def _generate_ollama(self, prompt: str, temperature: float, max_tokens: int) -> str | None:
+    def _generate_ollama(
+        self,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        model_override: str | None = None,
+    ) -> str | None:
+        selected_model = model_override or self.ollama_model
         try:
             response = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json={
-                    "model": self.ollama_model,
+                    "model": selected_model,
                     "prompt": prompt,
                     "stream": False,
                     "options": {
@@ -276,7 +349,18 @@ class UnifiedLLMClient:
             logger.error("Ollama generation failed: %s", exc)
             return None
 
-    def _generate_huggingface(self, prompt: str, temperature: float, max_tokens: int) -> str | None:
+    def _generate_huggingface(
+        self,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        model_override: str | None = None,
+    ) -> str | None:
+        if model_override and model_override != self.hf_model_name:
+            self.hf_model_name = model_override
+            self.hf_model = None
+            self.hf_tokenizer = None
+            self.hf_device = None
         self._load_hf_model()
         if self.hf_model is None or self.hf_tokenizer is None:
             return None
@@ -335,19 +419,61 @@ class UnifiedLLMClient:
 
     def get_backend_info(self) -> dict[str, Any]:
         available = self.get_available_backends()
-        available_backends = [name for name, is_available in available.items() if is_available]
         backend = self.backend.value
 
-        if backend not in available_backends:
+        if not available.get(backend, False):
             self.refresh_backend()
             backend = self.backend.value
 
+        backend_entries: list[dict[str, Any]] = []
+        available_names: list[str] = []
+
+        if available["ollama"]:
+            models = self._get_ollama_models()
+            backend_entries.append(
+                {
+                    "type": LLMBackend.OLLAMA.value,
+                    "models": models,
+                    "url": self.ollama_url,
+                }
+            )
+            available_names.append(LLMBackend.OLLAMA.value)
+
+        if available["huggingface"]:
+            backend_entries.append(
+                {
+                    "type": LLMBackend.HUGGINGFACE.value,
+                    "models": [self.hf_model_name],
+                    "device": "cuda" if self._has_gpu() else "cpu",
+                }
+            )
+            available_names.append(LLMBackend.HUGGINGFACE.value)
+
+        if available["openai"]:
+            backend_entries.append(
+                {
+                    "type": LLMBackend.OPENAI.value,
+                    "models": [self.openai_model],
+                }
+            )
+            available_names.append(LLMBackend.OPENAI.value)
+
+        backend_entries.append(
+            {
+                "type": LLMBackend.FALLBACK.value,
+                "models": ["template"],
+            }
+        )
+        available_names.append(LLMBackend.FALLBACK.value)
+
         return {
             "backend": backend,
-            "available_backends": available_backends,
+            "active_backend": backend,
+            "available_backends": backend_entries,
+            "available_backend_types": available_names,
             "openai_model": self.openai_model if available["openai"] else None,
             "ollama_url": self.ollama_url if available["ollama"] else None,
-            "ollama_model": self.ollama_model if available["ollama"] else None,
+            "ollama_model": self._get_ollama_models()[0] if available["ollama"] else None,
             "hf_model": self.hf_model_name if available["huggingface"] else None,
             "hf_device": self.hf_device if backend == LLMBackend.HUGGINGFACE.value else None,
         }

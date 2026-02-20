@@ -11,16 +11,20 @@ Secure grid-carbon infrastructure on ENTSO-E data.
 
 ## Quickstart
 ```bash
-cp .env.example .env
+cp .env.docker.example .env.docker
 poetry install
-python scripts/smoke_check.py
-docker compose up --build -d
-docker compose ps
+make start
+make status
 ```
 
 Expected healthy state:
-- Smoke check ends with `All smoke checks passed.`
 - Docker baseline stack shows running containers for `postgres`, `api`, and `app`.
+
+Useful commands:
+```bash
+make logs
+make stop
+```
 
 ## v1.1.0 Scope
 - OIDC/JWT auth with JWKS-backed token validation

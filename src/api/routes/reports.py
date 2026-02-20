@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+import uuid
+from datetime import date, datetime, timezone
 from statistics import mean, pstdev
 from time import perf_counter
 from typing import Any
@@ -8,11 +10,15 @@ from typing import Any
 import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
+from src.api.middleware.auth_dev import auth_bypass_enabled
 from src.api.middleware.auth import verify_token
 from src.api.models.schemas import TokenData
-from src.db.connection import get_connection
+from src.db.connection import get_connection, get_db_session
+from src.db.models import ReportHistory, ReportSession
 from src.services.llm_client import BackendType, LLMBackend, get_llm
+from src.services.report_templates import get_prompt as get_context_prompt
 from src.services.report_generator import (
     build_weighted_prompt,
     normalize_scenario_name,
@@ -21,6 +27,7 @@ from src.services.report_generator import (
 from src.utils.zones import get_zone_keys
 
 router = APIRouter(prefix="/api/reports", tags=["Reports"])
+logger = logging.getLogger(__name__)
 
 FOSSIL_INTENSITY_G_PER_KWH = 490.0
 SOLAR_INTENSITY_G_PER_KWH = 41.0
@@ -40,6 +47,8 @@ class ReportResponse(BaseModel):
     backend_info: dict[str, Any]
     generation_time_ms: float
     llm_available: bool
+    report_id: str | None = None
+    session_id: str | None = None
 
 
 class ReportRequest(BaseModel):
@@ -48,9 +57,59 @@ class ReportRequest(BaseModel):
     date_range: list[str] = Field(default_factory=list, max_length=2)
     scenario: str = Field(default="Base Case", min_length=1, max_length=64)
     parameter_weights: dict[str, float] | None = None
+    session_context: dict[str, Any] | None = None
     backend: BackendType | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=128)
     current_soc: int = Field(default=35, ge=5, le=95)
     tight_margin_mw: int = Field(default=1500, ge=100, le=10000)
+    session_id: str | None = Field(default=None, min_length=1, max_length=64)
+    save_history: bool = True
+
+
+class ReportHistoryItem(BaseModel):
+    report_id: str
+    session_id: str
+    generated_at: datetime
+    persona: str
+    zone: str
+    scenario: str | None
+    backend: str
+    model: str | None
+    is_favorite: bool
+    tags: list[str] | None
+
+
+class ReportHistoryListResponse(BaseModel):
+    reports: list[ReportHistoryItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class ReportHistoryDetailResponse(BaseModel):
+    report_id: str
+    session_id: str
+    generated_at: datetime
+    persona: str
+    zone: str
+    scenario: str | None
+    date_range_start: date | None
+    date_range_end: date | None
+    parameter_weights: dict[str, float] | None
+    narrative: str
+    data_summary: dict[str, Any]
+    backend: str
+    model: str | None
+    generation_time_ms: float | None
+    tags: list[str] | None
+    notes: str | None
+    is_favorite: bool
+
+
+class ReportHistoryUpdateRequest(BaseModel):
+    tags: list[str] | None = None
+    notes: str | None = None
+    is_favorite: bool | None = None
 
 
 PERSONA_ALIASES = {
@@ -71,6 +130,88 @@ def _normalize_persona(value: str) -> str:
         valid = ", ".join(sorted(PERSONA_ALIASES))
         raise ValueError(f"Unsupported persona '{value}'. Use one of: {valid}")
     return persona
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _resolve_model_name(backend: str, backend_info: dict[str, Any], requested_model: str | None) -> str | None:
+    if requested_model:
+        return requested_model
+    if backend == LLMBackend.OPENAI.value:
+        return backend_info.get("openai_model")
+    if backend == LLMBackend.OLLAMA.value:
+        return backend_info.get("ollama_model")
+    if backend == LLMBackend.HUGGINGFACE.value:
+        return backend_info.get("hf_model")
+    return None
+
+
+def _apply_history_scope(query: Any, token: TokenData) -> Any:
+    if auth_bypass_enabled():
+        return query
+    return query.join(ReportSession, ReportHistory.session_id == ReportSession.session_id).filter(
+        ReportSession.user_id == token.sub
+    )
+
+
+def _context_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _context_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _extract_request_context(request: ReportRequest) -> dict[str, Any]:
+    ctx = _context_dict(request.session_context)
+    generation_ctx = _context_dict(ctx.get("generation_params"))
+    fallback_zone = generation_ctx.get("zone") or ctx.get("zone") or request.zone
+    zone = str(fallback_zone or "DE").strip().upper()
+
+    scenario = str(ctx.get("scenario") or request.scenario or "Base Case")
+
+    ctx_date_range = _context_list(ctx.get("date_range"))
+    if not ctx_date_range:
+        ctx_date_range = _context_list(generation_ctx.get("date_range"))
+    date_range = [str(item) for item in ctx_date_range if str(item).strip()][:2] or request.date_range
+
+    weights = _context_dict(ctx.get("parameter_weights")) or request.parameter_weights
+
+    return {
+        "zone": zone,
+        "scenario": scenario,
+        "date_range": date_range,
+        "parameter_weights": weights,
+        "session_context": ctx,
+    }
+
+
+def _summarize_context(context: dict[str, Any]) -> dict[str, Any]:
+    generation_ctx = _context_dict(context.get("generation_params"))
+    load_ctx = _context_dict(context.get("load_params"))
+    carbon_ctx = _context_dict(context.get("carbon_params"))
+    price_ctx = _context_dict(context.get("price_params"))
+    visited_tabs = [str(item) for item in _context_list(context.get("visited_tabs")) if str(item).strip()]
+    generated_charts = [str(item) for item in _context_list(context.get("generated_charts")) if str(item).strip()]
+
+    return {
+        "session_id": context.get("session_id"),
+        "session_started_at": context.get("started_at"),
+        "session_updated_at": context.get("updated_at"),
+        "visited_tabs": visited_tabs,
+        "generated_charts": generated_charts,
+        "generation_context": generation_ctx,
+        "load_context": load_ctx,
+        "carbon_context": carbon_ctx,
+        "price_context": price_ctx,
+    }
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -414,6 +555,8 @@ def _generate_report_impl(
     date_range: list[str] | None,
     parameter_weights: dict[str, float] | None,
     backend: BackendType | None,
+    model: str | None,
+    session_context: dict[str, Any] | None = None,
 ) -> ReportResponse:
     started = perf_counter()
     normalized_persona = _normalize_persona(persona)
@@ -442,25 +585,49 @@ def _generate_report_impl(
         data_summary["data_warning"] = data_warning[:240]
     data_summary["scenario"] = normalized_scenario
     data_summary["parameter_weights"] = resolved_weights
+    data_summary.update(_summarize_context(_context_dict(session_context)))
     if clean_date_range:
         data_summary["analysis_period"] = clean_date_range
 
-    prompt = build_weighted_prompt(
-        data=data_summary,
-        persona=normalized_persona,
-        scenario=normalized_scenario,
-        date_range=clean_date_range,
-        weights=resolved_weights,
-    )
+    context_for_prompt = _context_dict(session_context)
+    if context_for_prompt:
+        try:
+            prompt = get_context_prompt(normalized_persona, data_summary)
+        except Exception:
+            prompt = build_weighted_prompt(
+                data=data_summary,
+                persona=normalized_persona,
+                scenario=normalized_scenario,
+                date_range=clean_date_range,
+                weights=resolved_weights,
+                session_context=context_for_prompt,
+            )
+    else:
+        prompt = build_weighted_prompt(
+            data=data_summary,
+            persona=normalized_persona,
+            scenario=normalized_scenario,
+            date_range=clean_date_range,
+            weights=resolved_weights,
+            session_context=context_for_prompt,
+        )
 
     llm = get_llm()
     llm.refresh_backend()
-    narrative = llm.generate(prompt, temperature=0.7, max_tokens=800, force_backend=backend)
+    narrative = llm.generate(
+        prompt,
+        temperature=0.7,
+        max_tokens=800,
+        force_backend=backend,
+        force_model=model,
+    )
     backend_info = llm.get_backend_info()
     selected_backend = backend if backend is not None else str(
-        backend_info.get("backend", LLMBackend.FALLBACK.value)
+        backend_info.get("active_backend") or backend_info.get("backend", LLMBackend.FALLBACK.value)
     )
     backend_info["backend"] = selected_backend
+    if model:
+        backend_info["requested_model"] = model
     llm_available = selected_backend != LLMBackend.FALLBACK.value
 
     if not llm_available and not narrative.strip():
@@ -483,22 +650,227 @@ def _generate_report_impl(
     )
 
 
+def _save_report_history(request: ReportRequest, response: ReportResponse, token: TokenData) -> tuple[str, str]:
+    db: Session = get_db_session()
+    try:
+        context = _context_dict(request.session_context)
+        context_session_id = str(context.get("session_id", "")).strip()
+        session_id = (request.session_id or "").strip() or context_session_id or str(uuid.uuid4())
+        session = db.query(ReportSession).filter(ReportSession.session_id == session_id).first()
+
+        if session is None:
+            session = ReportSession(session_id=session_id, user_id=token.sub)
+            db.add(session)
+            db.flush()
+        elif not auth_bypass_enabled() and session.user_id and session.user_id != token.sub:
+            raise HTTPException(status_code=403, detail="Session does not belong to current user")
+
+        if not session.user_id:
+            session.user_id = token.sub
+        session.updated_at = datetime.now(timezone.utc)
+
+        start_date = _parse_date(response.date_range[0]) if len(response.date_range) >= 1 else None
+        end_date = _parse_date(response.date_range[1]) if len(response.date_range) >= 2 else None
+        model_name = _resolve_model_name(response.backend, response.backend_info, request.model)
+        report_id = str(uuid.uuid4())
+
+        record = ReportHistory(
+            session_id=session_id,
+            report_id=report_id,
+            persona=response.persona,
+            zone=str(response.data_summary.get("zone", request.zone)).strip().upper(),
+            scenario=response.scenario,
+            date_range_start=start_date,
+            date_range_end=end_date,
+            parameter_weights=response.parameter_weights,
+            backend=response.backend,
+            model=model_name,
+            generation_time_ms=response.generation_time_ms,
+            narrative=response.narrative,
+            data_summary=response.data_summary,
+        )
+        db.add(record)
+        db.commit()
+        return report_id, session_id
+    except HTTPException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @router.post("/generate", response_model=ReportResponse)
 async def generate_report(request: ReportRequest, token: TokenData = Depends(verify_token)) -> ReportResponse:
-    del token
     try:
-        return _generate_report_impl(
+        context_inputs = _extract_request_context(request)
+        response = _generate_report_impl(
             persona=request.persona,
-            zone=request.zone,
+            zone=context_inputs["zone"],
             current_soc=request.current_soc,
             tight_margin_mw=request.tight_margin_mw,
-            scenario=request.scenario,
-            date_range=request.date_range,
-            parameter_weights=request.parameter_weights,
+            scenario=context_inputs["scenario"],
+            date_range=context_inputs["date_range"],
+            parameter_weights=context_inputs["parameter_weights"],
             backend=request.backend,
+            model=request.model,
+            session_context=context_inputs["session_context"],
         )
+
+        if request.save_history:
+            try:
+                report_id, session_id = _save_report_history(request, response, token)
+                response = response.model_copy(update={"report_id": report_id, "session_id": session_id})
+            except Exception as exc:  # pragma: no cover - defensive persistence fallback
+                logger.warning("Failed to save report history: %s", exc)
+                response.backend_info["history_warning"] = str(exc)
+
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/history", response_model=ReportHistoryListResponse)
+async def list_report_history(
+    session_id: str | None = Query(default=None),
+    persona: str | None = Query(default=None),
+    zone: str | None = Query(default=None),
+    scenario: str | None = Query(default=None),
+    is_favorite: bool | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    token: TokenData = Depends(verify_token),
+) -> ReportHistoryListResponse:
+    db: Session = get_db_session()
+    try:
+        query = db.query(ReportHistory)
+        query = _apply_history_scope(query, token)
+
+        if session_id:
+            query = query.filter(ReportHistory.session_id == session_id)
+        if persona:
+            try:
+                normalized_persona = _normalize_persona(persona)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            query = query.filter(ReportHistory.persona == normalized_persona)
+        if zone:
+            query = query.filter(ReportHistory.zone == zone.strip().upper())
+        if scenario:
+            query = query.filter(ReportHistory.scenario == normalize_scenario_name(scenario))
+        if is_favorite is not None:
+            query = query.filter(ReportHistory.is_favorite == is_favorite)
+
+        total = query.count()
+        rows = query.order_by(ReportHistory.generated_at.desc()).offset(offset).limit(limit).all()
+
+        items = [
+            ReportHistoryItem(
+                report_id=row.report_id,
+                session_id=row.session_id,
+                generated_at=row.generated_at,
+                persona=row.persona,
+                zone=row.zone,
+                scenario=row.scenario,
+                backend=row.backend,
+                model=row.model,
+                is_favorite=row.is_favorite,
+                tags=row.tags,
+            )
+            for row in rows
+        ]
+        return ReportHistoryListResponse(reports=items, total=total, limit=limit, offset=offset)
+    finally:
+        db.close()
+
+
+@router.get("/history/{report_id}", response_model=ReportHistoryDetailResponse)
+async def get_report_history_item(
+    report_id: str,
+    token: TokenData = Depends(verify_token),
+) -> ReportHistoryDetailResponse:
+    db: Session = get_db_session()
+    try:
+        query = db.query(ReportHistory)
+        query = _apply_history_scope(query, token)
+        row = query.filter(ReportHistory.report_id == report_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        weights = None
+        if isinstance(row.parameter_weights, dict):
+            weights = {str(key): float(value) for key, value in row.parameter_weights.items()}
+
+        return ReportHistoryDetailResponse(
+            report_id=row.report_id,
+            session_id=row.session_id,
+            generated_at=row.generated_at,
+            persona=row.persona,
+            zone=row.zone,
+            scenario=row.scenario,
+            date_range_start=row.date_range_start,
+            date_range_end=row.date_range_end,
+            parameter_weights=weights,
+            narrative=row.narrative,
+            data_summary=row.data_summary or {},
+            backend=row.backend,
+            model=row.model,
+            generation_time_ms=row.generation_time_ms,
+            tags=row.tags,
+            notes=row.notes,
+            is_favorite=row.is_favorite,
+        )
+    finally:
+        db.close()
+
+
+@router.patch("/history/{report_id}")
+async def update_report_history_item(
+    report_id: str,
+    request: ReportHistoryUpdateRequest,
+    token: TokenData = Depends(verify_token),
+) -> dict[str, str]:
+    if request.tags is None and request.notes is None and request.is_favorite is None:
+        raise HTTPException(status_code=400, detail="Provide at least one field to update")
+
+    db: Session = get_db_session()
+    try:
+        query = db.query(ReportHistory)
+        query = _apply_history_scope(query, token)
+        row = query.filter(ReportHistory.report_id == report_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        if request.tags is not None:
+            row.tags = request.tags
+        if request.notes is not None:
+            row.notes = request.notes
+        if request.is_favorite is not None:
+            row.is_favorite = request.is_favorite
+
+        db.commit()
+        return {"status": "updated"}
+    finally:
+        db.close()
+
+
+@router.delete("/history/{report_id}")
+async def delete_report_history_item(
+    report_id: str,
+    token: TokenData = Depends(verify_token),
+) -> dict[str, str]:
+    db: Session = get_db_session()
+    try:
+        query = db.query(ReportHistory)
+        query = _apply_history_scope(query, token)
+        row = query.filter(ReportHistory.report_id == report_id).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        db.delete(row)
+        db.commit()
+        return {"status": "deleted"}
+    finally:
+        db.close()
 
 
 @router.get("/generate", response_model=ReportResponse)
@@ -520,6 +892,7 @@ async def generate_report_legacy_get(
             date_range=[],
             parameter_weights=None,
             backend=None,
+            model=None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -11,7 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from src.api.middleware.auth import verify_token
 from src.api.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from src.api.models.schemas import ErrorResponse, TokenData
-from src.api.routes import analytics, carbon_intensity, generation, indicators, legacy, reports
+from src.api.routes import analytics, carbon_intensity, generation, indicators, ingest, legacy, reports
 from src.db.connection import get_connection
 
 app = FastAPI(
@@ -90,6 +90,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 app.include_router(legacy.router)
 app.include_router(indicators.router)
 app.include_router(generation.router)
+app.include_router(ingest.router)
 app.include_router(carbon_intensity.router)
 app.include_router(analytics.router)
 app.include_router(analytics.metrics_router)
