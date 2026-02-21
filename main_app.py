@@ -83,6 +83,14 @@ SCENARIO_DEFAULT_WEIGHTS = {
     "Custom": {"price": 0.25, "renewable_share": 0.25, "margin": 0.25, "carbon": 0.25},
 }
 
+REGIME_ZONE_CAPACITY_MW = {
+    "DE": 180000.0,
+    "FR": 140000.0,
+    "GB": 110000.0,
+    "ES": 100000.0,
+    "IT": 95000.0,
+}
+
 
 # ══════════════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -603,6 +611,191 @@ def fetch_generation_via_api(zone, start_dt, end_dt):
 
     payload = response.json()
     return int(payload.get("rows_inserted", 0))
+
+
+def table_exists(conn, table_name):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = %s
+            )
+            """,
+            (table_name,),
+        )
+        row = cur.fetchone()
+    return bool(row[0]) if row else False
+
+
+def ensure_regime_states_table(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS regime_states (
+                time TIMESTAMPTZ NOT NULL,
+                zone VARCHAR(50) NOT NULL,
+                load_tightness NUMERIC,
+                res_penetration NUMERIC,
+                net_import NUMERIC,
+                interconnect_saturation NUMERIC,
+                price_volatility NUMERIC,
+                regime_id INT,
+                regime_name VARCHAR(50),
+                regime_confidence NUMERIC,
+                PRIMARY KEY (time, zone)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_regime_states_zone_time
+            ON regime_states (zone, time DESC)
+            """
+        )
+
+
+def _fallback_regime_label(res_penetration, net_import, price_volatility):
+    if net_import > 1200 or price_volatility > 15:
+        return 1, "Stressed", 0.55
+    if res_penetration >= 55 and abs(net_import) <= 1000:
+        return 2, "RES-Dominant", 0.55
+    return 0, "Normal", 0.55
+
+
+def bootstrap_regime_states(conn, zone, detector=None, lookback_days=30):
+    ensure_regime_states_table(conn)
+    if not table_exists(conn, "generation_records"):
+        return 0
+
+    has_load = table_exists(conn, "load_records")
+    has_price = table_exists(conn, "price_records")
+    load_select = "COALESCE(l.load_mw, g.total_mw) AS load_mw" if has_load else "g.total_mw AS load_mw"
+    price_select = "p.price_eur_mwh AS price_eur_mwh" if has_price else "NULL::DOUBLE PRECISION AS price_eur_mwh"
+    load_join = "LEFT JOIN load_records l ON l.zone = g.zone AND l.timestamp = g.timestamp" if has_load else ""
+    price_join = "LEFT JOIN price_records p ON p.zone = g.zone AND p.timestamp = g.timestamp" if has_price else ""
+
+    query = f"""
+        SELECT
+            g.timestamp AS time,
+            g.zone,
+            g.wind_mw,
+            g.solar_mw,
+            g.hydro_mw,
+            g.total_mw,
+            {load_select},
+            {price_select}
+        FROM generation_records g
+        {load_join}
+        {price_join}
+        WHERE g.zone = %s
+          AND g.timestamp >= NOW() - make_interval(days => %s)
+        ORDER BY g.timestamp
+    """
+    df = pd.read_sql_query(query, conn, params=(zone, lookback_days))
+    if df.empty:
+        return 0
+
+    numeric_cols = ["wind_mw", "solar_mw", "hydro_mw", "total_mw", "load_mw", "price_eur_mwh"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    capacity = REGIME_ZONE_CAPACITY_MW.get(
+        zone,
+        float(df["total_mw"].quantile(0.95) * 1.2) if not df["total_mw"].dropna().empty else 100000.0,
+    )
+    if capacity <= 0:
+        capacity = 100000.0
+
+    renewable_mw = df["wind_mw"].fillna(0.0) + df["solar_mw"].fillna(0.0) + df["hydro_mw"].fillna(0.0)
+    df["load_tightness"] = df["load_mw"].fillna(df["total_mw"]).fillna(0.0) / capacity
+    df["res_penetration"] = 0.0
+    non_zero = df["total_mw"].fillna(0.0) > 0
+    df.loc[non_zero, "res_penetration"] = (
+        renewable_mw.loc[non_zero] / df.loc[non_zero, "total_mw"].fillna(0.0) * 100.0
+    )
+    df["net_import"] = df["load_mw"].fillna(df["total_mw"]).fillna(0.0) - df["total_mw"].fillna(0.0)
+    df["interconnect_saturation"] = (df["net_import"].abs() / 3000.0 * 100.0).clip(lower=0.0, upper=100.0)
+
+    if df["price_eur_mwh"].notna().sum() >= 6:
+        df["price_volatility"] = (
+            df["price_eur_mwh"].fillna(method="ffill").fillna(method="bfill").fillna(0.0).rolling(24, min_periods=3).std()
+        )
+    else:
+        proxy = df["total_mw"].fillna(method="ffill").fillna(method="bfill").fillna(0.0)
+        df["price_volatility"] = proxy.pct_change().fillna(0.0).rolling(24, min_periods=3).std() * 100.0
+    df["price_volatility"] = df["price_volatility"].fillna(0.0)
+
+    records = []
+    for _, row in df.iterrows():
+        res_pen = float(row.get("res_penetration", 0.0))
+        net_import = float(row.get("net_import", 0.0))
+        price_vol = float(row.get("price_volatility", 0.0))
+        regime_id, regime_name, regime_conf = _fallback_regime_label(res_pen, net_import, price_vol)
+
+        if detector is not None:
+            try:
+                pred = detector.predict_regime(res_pen, net_import, price_vol)
+                regime_id = int(pred.get("regime_id", regime_id))
+                regime_name = str(pred.get("regime_name", regime_name))
+                regime_conf = float(pred.get("confidence", regime_conf))
+            except Exception:
+                pass
+
+        records.append(
+            (
+                row["time"],
+                str(row.get("zone", zone)),
+                float(row.get("load_tightness", 0.0)),
+                res_pen,
+                net_import,
+                float(row.get("interconnect_saturation", 0.0)),
+                price_vol,
+                regime_id,
+                regime_name,
+                regime_conf,
+            )
+        )
+
+    if not records:
+        return 0
+
+    with conn.cursor() as cur:
+        psycopg2.extras.execute_batch(
+            cur,
+            """
+            INSERT INTO regime_states (
+                time,
+                zone,
+                load_tightness,
+                res_penetration,
+                net_import,
+                interconnect_saturation,
+                price_volatility,
+                regime_id,
+                regime_name,
+                regime_confidence
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (time, zone)
+            DO UPDATE SET
+                load_tightness = EXCLUDED.load_tightness,
+                res_penetration = EXCLUDED.res_penetration,
+                net_import = EXCLUDED.net_import,
+                interconnect_saturation = EXCLUDED.interconnect_saturation,
+                price_volatility = EXCLUDED.price_volatility,
+                regime_id = EXCLUDED.regime_id,
+                regime_name = EXCLUDED.regime_name,
+                regime_confidence = EXCLUDED.regime_confidence
+            """,
+            records,
+            page_size=500,
+        )
+    return len(records)
+
 
 def set_global_range(start_date, end_date):
     st.session_state["global_start"] = start_date
@@ -2699,23 +2892,8 @@ direction and magnitude, not absolute price, as the insight.
         return
 
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                      AND table_name = 'regime_states'
-                )
-                """
-            )
-            has_regime_states = bool(cur.fetchone()[0])
+        has_regime_states = table_exists(conn, "regime_states")
     except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
         has_regime_states = False
 
     if not has_regime_states:
@@ -2723,6 +2901,20 @@ direction and magnitude, not absolute price, as the insight.
             "No regime data available yet (`public.regime_states` table is missing). "
             "Run the regime computation pipeline first."
         )
+        if st.button("Initialize regime table from current data", key="init_regime_table"):
+            with st.spinner("Bootstrapping regime states from current time-series data..."):
+                try:
+                    inserted = bootstrap_regime_states(conn, country, detector=detector, lookback_days=30)
+                except Exception as exc:
+                    logger.exception("Failed to bootstrap regime table")
+                    st.error(f"Regime bootstrap failed: {exc}")
+                    inserted = 0
+            if inserted > 0:
+                st.success(f"Initialized regime table with {inserted:,} records for {country}.")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.warning("No records generated. Ingest generation/load data first, then retry.")
         if st.button("Show demo regime snapshot", key="demo_regime_table_missing"):
             st.subheader("Current Operating Regime (Demo)")
             c1, c2, c3, c4 = st.columns(4)
@@ -2759,6 +2951,20 @@ direction and magnitude, not absolute price, as the insight.
 
     if latest.empty:
         st.info(f"No regime data available for {country}. Run the regime computation pipeline first.")
+        if st.button("Compute regime data for this zone", key="bootstrap_regime_zone"):
+            with st.spinner(f"Computing regime states for {country}..."):
+                try:
+                    inserted = bootstrap_regime_states(conn, country, detector=detector, lookback_days=30)
+                except Exception as exc:
+                    logger.exception("Failed to compute regime data")
+                    st.error(f"Regime bootstrap failed: {exc}")
+                    inserted = 0
+            if inserted > 0:
+                st.success(f"Generated {inserted:,} regime rows for {country}.")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.warning("No records generated. Ingest generation/load data first, then retry.")
         if st.button("Show demo regime snapshot", key="demo_regime_empty"):
             st.subheader("Current Operating Regime (Demo)")
             c1, c2, c3, c4 = st.columns(4)
