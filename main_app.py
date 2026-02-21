@@ -12,6 +12,7 @@ import uuid
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Any
 
 import streamlit as st
 import pandas as pd
@@ -142,6 +143,10 @@ def _ensure_analysis_session() -> dict:
     if isinstance(context_buffer, dict):
         for key, value in context_buffer.items():
             if key.endswith("_params") or key in {
+                "generation_updated_at",
+                "load_updated_at",
+                "carbon_updated_at",
+                "price_updated_at",
                 "zone",
                 "scenario",
                 "date_range",
@@ -156,6 +161,7 @@ def _ensure_analysis_session() -> dict:
 
 def update_session_context(tab_name: str, params: dict | None = None, charts: list[str] | None = None) -> None:
     context_buffer = st.session_state.setdefault("context_buffer", {})
+    now_iso = datetime.utcnow().isoformat()
 
     visited_tabs = context_buffer.setdefault("visited_tabs", [])
     if tab_name not in visited_tabs:
@@ -163,12 +169,60 @@ def update_session_context(tab_name: str, params: dict | None = None, charts: li
 
     if params is not None:
         context_buffer[f"{tab_name}_params"] = params
+        context_buffer[f"{tab_name}_updated_at"] = now_iso
     if charts:
         existing = set(context_buffer.get("generated_charts", []))
         existing.update(charts)
         context_buffer["generated_charts"] = sorted(existing)
 
-    context_buffer["updated_at"] = datetime.utcnow().isoformat()
+    context_buffer["updated_at"] = now_iso
+
+
+def _normalize_context_date_range(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    normalized = [str(item) for item in value if str(item).strip()][:2]
+    return normalized or None
+
+
+def _resolve_ai_insights_defaults(session_ctx: dict) -> tuple[str, list[str] | None]:
+    default_zone = str(session_ctx.get("zone") or "DE").strip().upper() or "DE"
+    default_date_range = _normalize_context_date_range(session_ctx.get("date_range"))
+
+    latest_params: dict[str, Any] | None = None
+    latest_updated_at = ""
+    candidates = [
+        ("generation_params", "generation_updated_at"),
+        ("load_params", "load_updated_at"),
+        ("carbon_params", "carbon_updated_at"),
+        ("price_params", "price_updated_at"),
+    ]
+    for params_key, updated_key in candidates:
+        params = session_ctx.get(params_key)
+        if not isinstance(params, dict) or not params:
+            continue
+        updated_at = str(session_ctx.get(updated_key) or "")
+        if updated_at >= latest_updated_at:
+            latest_updated_at = updated_at
+            latest_params = params
+
+    if latest_params is None:
+        fallback_generation = session_ctx.get("generation_params")
+        if isinstance(fallback_generation, dict) and fallback_generation:
+            latest_params = fallback_generation
+
+    if not latest_params:
+        return default_zone, default_date_range
+
+    resolved_zone = ""
+    for zone_key in ("zone", "country", "default_country"):
+        zone_value = latest_params.get(zone_key)
+        if isinstance(zone_value, str) and zone_value.strip():
+            resolved_zone = zone_value.strip().upper()
+            break
+
+    resolved_date_range = _normalize_context_date_range(latest_params.get("date_range"))
+    return (resolved_zone or default_zone), (resolved_date_range or default_date_range)
 
 # Professional CSS (kept from original streamlit_carbon_app.py)
 st.markdown(
@@ -1346,13 +1400,20 @@ st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 # ══════════════════════════════════════════════════════════════
 
 def render_ai_insights(zone):
+    del zone
     session_ctx = _ensure_analysis_session()
+    insights_zone, insights_date_range = _resolve_ai_insights_defaults(session_ctx)
+    report_session_context = dict(session_ctx)
+    report_session_context["zone"] = insights_zone
+    if insights_date_range is not None:
+        report_session_context["date_range"] = insights_date_range
+
     update_session_context(
         "ai_insights",
         {
-            "zone": session_ctx.get("zone"),
+            "zone": insights_zone,
             "scenario": session_ctx.get("scenario"),
-            "date_range": session_ctx.get("date_range"),
+            "date_range": insights_date_range,
         },
     )
 
@@ -1360,9 +1421,9 @@ def render_ai_insights(zone):
     st.markdown("Generate narrative reports from the full dashboard analysis context.")
     st.info(
         f"""**Current Analysis Session**
-- Zone: {session_ctx.get('zone', 'DE')}
+- Zone: {insights_zone}
 - Scenario: {session_ctx.get('scenario', 'Base Case')}
-- Date range: {session_ctx.get('date_range') or 'Not set'}
+- Date range: {insights_date_range or 'Not set'}
 - Tabs visited: {', '.join(session_ctx.get('visited_tabs', [])) or 'None yet'}
 
 Navigate to other tabs first to build richer context for report generation."""
@@ -1449,7 +1510,7 @@ Navigate to other tabs first to build richer context for report generation."""
             "persona": persona,
             "backend": backend_choice,
             "save_history": True,
-            "session_context": session_ctx,
+            "session_context": report_session_context,
         }
         if model_choice:
             report_request["model"] = model_choice
@@ -1476,6 +1537,7 @@ Navigate to other tabs first to build richer context for report generation."""
         st.success(f"Analysis complete ({report.get('backend', backend_choice)}).")
         if report.get("session_id"):
             session_ctx["session_id"] = report["session_id"]
+            report_session_context["session_id"] = report["session_id"]
         if report.get("report_id"):
             st.success(f"Report saved (ID: {report['report_id'][:8]}...)")
 
@@ -1483,7 +1545,7 @@ Navigate to other tabs first to build richer context for report generation."""
         st.markdown(report.get("narrative", "No narrative returned."))
 
         with st.expander("Analysis context used"):
-            st.json(session_ctx)
+            st.json(report_session_context)
         with st.expander("Data summary"):
             st.json(report.get("data_summary", {}))
 
