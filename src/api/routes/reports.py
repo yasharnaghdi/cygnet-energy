@@ -169,18 +169,29 @@ def _context_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _resolve_generation_context(context: dict[str, Any]) -> dict[str, Any]:
+    generation_ctx = _context_dict(context.get("generation_context"))
+    if generation_ctx:
+        return generation_ctx
+    return _context_dict(context.get("generation_params"))
+
+
+def _normalize_date_range(value: Any) -> list[str]:
+    return [str(item) for item in _context_list(value) if str(item).strip()][:2]
+
+
 def _extract_request_context(request: ReportRequest) -> dict[str, Any]:
     ctx = _context_dict(request.session_context)
-    generation_ctx = _context_dict(ctx.get("generation_params"))
+    generation_ctx = _resolve_generation_context(ctx)
     fallback_zone = generation_ctx.get("zone") or ctx.get("zone") or request.zone
     zone = str(fallback_zone or "DE").strip().upper()
 
     scenario = str(ctx.get("scenario") or request.scenario or "Base Case")
 
-    ctx_date_range = _context_list(ctx.get("date_range"))
+    ctx_date_range = _normalize_date_range(generation_ctx.get("date_range"))
     if not ctx_date_range:
-        ctx_date_range = _context_list(generation_ctx.get("date_range"))
-    date_range = [str(item) for item in ctx_date_range if str(item).strip()][:2] or request.date_range
+        ctx_date_range = _normalize_date_range(ctx.get("date_range"))
+    date_range = ctx_date_range or request.date_range
 
     weights = _context_dict(ctx.get("parameter_weights")) or request.parameter_weights
 
@@ -194,7 +205,7 @@ def _extract_request_context(request: ReportRequest) -> dict[str, Any]:
 
 
 def _summarize_context(context: dict[str, Any]) -> dict[str, Any]:
-    generation_ctx = _context_dict(context.get("generation_params"))
+    generation_ctx = _resolve_generation_context(context)
     load_ctx = _context_dict(context.get("load_params"))
     carbon_ctx = _context_dict(context.get("carbon_params"))
     price_ctx = _context_dict(context.get("price_params"))
@@ -494,6 +505,31 @@ def _build_summary(
     }
 
 
+def _apply_generation_context_overrides(data_summary: dict[str, Any], context: dict[str, Any]) -> None:
+    generation_ctx = _resolve_generation_context(context)
+    if not generation_ctx:
+        return
+
+    generation_zone = str(generation_ctx.get("zone") or "").strip().upper()
+    if generation_zone:
+        data_summary["zone"] = generation_zone
+
+    generation_period = _normalize_date_range(generation_ctx.get("date_range"))
+    if generation_period:
+        data_summary["analysis_period"] = generation_period
+
+    renewable_pct = _to_float(generation_ctx.get("renewable_pct"), default=0.0)
+    if renewable_pct > 0:
+        renewable_pct = _safe_round(renewable_pct, 1)
+        data_summary["renewable_pct"] = renewable_pct
+        data_summary["current_renewable_pct"] = renewable_pct
+        data_summary["avg_renewable_pct"] = renewable_pct
+
+    total_generation = _to_float(generation_ctx.get("total_generation_mwh"), default=0.0)
+    if total_generation > 0:
+        data_summary["total_generation_mwh"] = _safe_round(total_generation, 2)
+
+
 def _fallback_narrative(persona: str, summary: dict[str, Any], reason: str | None = None) -> str:
     prefix = "LLM unavailable. Showing deterministic summary."
     if reason:
@@ -559,11 +595,18 @@ def _generate_report_impl(
     session_context: dict[str, Any] | None = None,
 ) -> ReportResponse:
     started = perf_counter()
+    context_for_prompt = _context_dict(session_context)
+    generation_ctx = _resolve_generation_context(context_for_prompt)
     normalized_persona = _normalize_persona(persona)
     normalized_zone = zone.strip().upper()
+    generation_zone = str(generation_ctx.get("zone") or "").strip().upper()
+    if generation_zone:
+        normalized_zone = generation_zone
     normalized_scenario = normalize_scenario_name(scenario)
     resolved_weights = resolve_parameter_weights(normalized_scenario, parameter_weights)
     clean_date_range = [str(item) for item in (date_range or []) if str(item).strip()][:2]
+    if not clean_date_range:
+        clean_date_range = _normalize_date_range(generation_ctx.get("date_range"))
 
     rows_24h: list[dict[str, Any]] = []
     rows_7d: list[dict[str, Any]] = []
@@ -585,11 +628,10 @@ def _generate_report_impl(
         data_summary["data_warning"] = data_warning[:240]
     data_summary["scenario"] = normalized_scenario
     data_summary["parameter_weights"] = resolved_weights
-    data_summary.update(_summarize_context(_context_dict(session_context)))
+    data_summary.update(_summarize_context(context_for_prompt))
     if clean_date_range:
         data_summary["analysis_period"] = clean_date_range
-
-    context_for_prompt = _context_dict(session_context)
+    _apply_generation_context_overrides(data_summary, context_for_prompt)
     if context_for_prompt:
         try:
             prompt = get_context_prompt(normalized_persona, data_summary)

@@ -345,3 +345,42 @@ def test_reports_generate_uses_session_context_values(monkeypatch) -> None:
     assert payload["data_summary"]["load_context"] == {"peak_hour": 18, "peak_mw": 61200}
     assert payload["data_summary"]["carbon_context"] == {"avg_intensity": 243.1}
     assert payload["data_summary"]["price_context"] == {"latest_price": 101.4}
+
+
+def test_reports_generate_overrides_zero_summary_with_generation_context(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_BYPASS_DEV", "true")
+    monkeypatch.setattr(reports, "get_connection", lambda: DummyConnection([]))
+    monkeypatch.setattr(reports, "get_llm", lambda: FakeLLM("fallback", "Context-bridged report."))
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/reports/generate",
+        json={
+            "persona": "trader",
+            "zone": "FR",
+            "scenario": "Base Case",
+            "date_range": ["2024-12-12", "2024-12-12"],
+            "save_history": False,
+            "session_context": {
+                "zone": "FR",
+                "date_range": ["2024-12-12", "2024-12-12"],
+                "generation_context": {
+                    "zone": "DE",
+                    "date_range": ["2025-12-01", "2025-12-31"],
+                    "rows": 1260,
+                    "renewable_pct": 64.07,
+                    "total_generation_mwh": 987654.32,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["date_range"] == ["2025-12-01", "2025-12-31"]
+    assert payload["data_summary"]["zone"] == "DE"
+    assert payload["data_summary"]["analysis_period"] == ["2025-12-01", "2025-12-31"]
+    assert payload["data_summary"]["renewable_pct"] == pytest.approx(64.1, abs=1e-9)
+    assert payload["data_summary"]["current_renewable_pct"] == pytest.approx(64.1, abs=1e-9)
+    assert payload["data_summary"]["avg_renewable_pct"] == pytest.approx(64.1, abs=1e-9)
+    assert payload["data_summary"]["total_generation_mwh"] == pytest.approx(987654.32, abs=1e-9)
