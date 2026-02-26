@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from statistics import mean, pstdev
 from time import perf_counter
 from typing import Any
@@ -181,18 +181,57 @@ def _normalize_date_range(value: Any) -> list[str]:
     return [str(item) for item in _context_list(value) if str(item).strip()][:2]
 
 
+def _default_date_range() -> list[str]:
+    today = datetime.now(timezone.utc).date()
+    return [(today - timedelta(days=30)).isoformat(), today.isoformat()]
+
+
+def _resolve_zone_and_dates(session_context: dict[str, Any]) -> tuple[str, list[str]]:
+    """
+    Priority (highest first):
+    1. generation_context.zone / generation_context.date_range
+    2. session_context.zone / session_context.date_range
+    3. ai_insights_params.zone / ai_insights_params.date_range
+    4. Hardcoded fallback: DE / last 30 days
+    """
+    generation_ctx = _resolve_generation_context(session_context)
+    ai_ctx = _context_dict(session_context.get("ai_insights_params"))
+
+    zone = str(
+        generation_ctx.get("zone")
+        or session_context.get("zone")
+        or ai_ctx.get("zone")
+        or "DE"
+    ).strip().upper()
+
+    date_range = (
+        _normalize_date_range(generation_ctx.get("date_range"))
+        or _normalize_date_range(session_context.get("date_range"))
+        or _normalize_date_range(ai_ctx.get("date_range"))
+        or _default_date_range()
+    )
+    return zone, date_range
+
+
 def _extract_request_context(request: ReportRequest) -> dict[str, Any]:
     ctx = _context_dict(request.session_context)
+    resolved_zone, resolved_date_range = _resolve_zone_and_dates(ctx)
     generation_ctx = _resolve_generation_context(ctx)
-    fallback_zone = generation_ctx.get("zone") or ctx.get("zone") or request.zone
-    zone = str(fallback_zone or "DE").strip().upper()
-
+    ai_ctx = _context_dict(ctx.get("ai_insights_params"))
     scenario = str(ctx.get("scenario") or request.scenario or "Base Case")
-
-    ctx_date_range = _normalize_date_range(generation_ctx.get("date_range"))
-    if not ctx_date_range:
-        ctx_date_range = _normalize_date_range(ctx.get("date_range"))
-    date_range = ctx_date_range or request.date_range
+    request_date_range = _normalize_date_range(request.date_range)
+    has_ctx_zone = bool(generation_ctx.get("zone") or ctx.get("zone") or ai_ctx.get("zone"))
+    has_ctx_date = bool(
+        _normalize_date_range(generation_ctx.get("date_range"))
+        or _normalize_date_range(ctx.get("date_range"))
+        or _normalize_date_range(ai_ctx.get("date_range"))
+    )
+    if ctx:
+        zone = resolved_zone if has_ctx_zone else str(request.zone or resolved_zone or "DE").strip().upper()
+        date_range = resolved_date_range if has_ctx_date else (request_date_range or resolved_date_range)
+    else:
+        zone = str(request.zone or resolved_zone or "DE").strip().upper()
+        date_range = request_date_range or resolved_date_range or _default_date_range()
 
     weights = _context_dict(ctx.get("parameter_weights")) or request.parameter_weights
 
@@ -597,17 +636,18 @@ def _generate_report_impl(
 ) -> ReportResponse:
     started = perf_counter()
     context_for_prompt = _context_dict(session_context)
-    generation_ctx = _resolve_generation_context(context_for_prompt)
+    resolved_zone, resolved_date_range = _resolve_zone_and_dates(context_for_prompt)
     normalized_persona = _normalize_persona(persona)
-    normalized_zone = zone.strip().upper()
-    generation_zone = str(generation_ctx.get("zone") or "").strip().upper()
-    if generation_zone:
-        normalized_zone = generation_zone
+    normalized_zone = (zone or "DE").strip().upper()
+    if context_for_prompt:
+        normalized_zone = resolved_zone
     normalized_scenario = normalize_scenario_name(scenario)
     resolved_weights = resolve_parameter_weights(normalized_scenario, parameter_weights)
-    clean_date_range = [str(item) for item in (date_range or []) if str(item).strip()][:2]
+    clean_date_range = _normalize_date_range(date_range)
+    if context_for_prompt:
+        clean_date_range = _normalize_date_range(resolved_date_range) or clean_date_range
     if not clean_date_range:
-        clean_date_range = _normalize_date_range(generation_ctx.get("date_range"))
+        clean_date_range = _default_date_range()
 
     rows_24h: list[dict[str, Any]] = []
     rows_7d: list[dict[str, Any]] = []
