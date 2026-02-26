@@ -18,6 +18,7 @@ from src.api.models.schemas import TokenData
 from src.db.connection import get_connection, get_db_session
 from src.db.models import ReportHistory, ReportSession
 from src.services.llm_client import BackendType, LLMBackend, get_llm
+from src.services.report_storage import save_report_to_s3
 from src.services.report_templates import get_prompt as get_context_prompt
 from src.services.report_generator import (
     build_weighted_prompt,
@@ -741,6 +742,36 @@ def _save_report_history(request: ReportRequest, response: ReportResponse, token
         db.close()
 
 
+def _save_report_s3_backup(report_id: str, request: ReportRequest, response: ReportResponse, token: TokenData) -> None:
+    report_data = {
+        "report_id": report_id,
+        "session_id": response.session_id,
+        "narrative": response.narrative,
+        "data_summary": response.data_summary,
+        "persona": request.persona,
+        "generated_at": response.generated_at.isoformat(),
+    }
+    s3_url = save_report_to_s3(report_id, report_data)
+    if not s3_url or not hasattr(ReportHistory, "s3_url"):
+        return
+
+    db: Session = get_db_session()
+    try:
+        query = db.query(ReportHistory)
+        query = _apply_history_scope(query, token)
+        row = query.filter(ReportHistory.report_id == report_id).first()
+        if row is None:
+            return
+
+        row.s3_url = s3_url
+        db.commit()
+    except Exception as exc:  # pragma: no cover - optional persistence metadata
+        db.rollback()
+        logger.warning("Failed to persist report s3_url metadata: %s", exc)
+    finally:
+        db.close()
+
+
 @router.post("/generate", response_model=ReportResponse)
 async def generate_report(request: ReportRequest, token: TokenData = Depends(verify_token)) -> ReportResponse:
     try:
@@ -762,6 +793,7 @@ async def generate_report(request: ReportRequest, token: TokenData = Depends(ver
             try:
                 report_id, session_id = _save_report_history(request, response, token)
                 response = response.model_copy(update={"report_id": report_id, "session_id": session_id})
+                _save_report_s3_backup(report_id, request, response, token)
             except Exception as exc:  # pragma: no cover - defensive persistence fallback
                 logger.warning("Failed to save report history: %s", exc)
                 response.backend_info["history_warning"] = str(exc)
