@@ -12,7 +12,6 @@ import uuid
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Any
 
 import streamlit as st
 import pandas as pd
@@ -84,14 +83,6 @@ SCENARIO_DEFAULT_WEIGHTS = {
     "Custom": {"price": 0.25, "renewable_share": 0.25, "margin": 0.25, "carbon": 0.25},
 }
 
-REGIME_ZONE_CAPACITY_MW = {
-    "DE": 180000.0,
-    "FR": 140000.0,
-    "GB": 110000.0,
-    "ES": 100000.0,
-    "IT": 95000.0,
-}
-
 
 # ══════════════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -143,10 +134,6 @@ def _ensure_analysis_session() -> dict:
     if isinstance(context_buffer, dict):
         for key, value in context_buffer.items():
             if key.endswith("_params") or key in {
-                "generation_updated_at",
-                "load_updated_at",
-                "carbon_updated_at",
-                "price_updated_at",
                 "zone",
                 "scenario",
                 "date_range",
@@ -161,7 +148,6 @@ def _ensure_analysis_session() -> dict:
 
 def update_session_context(tab_name: str, params: dict | None = None, charts: list[str] | None = None) -> None:
     context_buffer = st.session_state.setdefault("context_buffer", {})
-    now_iso = datetime.utcnow().isoformat()
 
     visited_tabs = context_buffer.setdefault("visited_tabs", [])
     if tab_name not in visited_tabs:
@@ -169,60 +155,12 @@ def update_session_context(tab_name: str, params: dict | None = None, charts: li
 
     if params is not None:
         context_buffer[f"{tab_name}_params"] = params
-        context_buffer[f"{tab_name}_updated_at"] = now_iso
     if charts:
         existing = set(context_buffer.get("generated_charts", []))
         existing.update(charts)
         context_buffer["generated_charts"] = sorted(existing)
 
-    context_buffer["updated_at"] = now_iso
-
-
-def _normalize_context_date_range(value: Any) -> list[str] | None:
-    if not isinstance(value, list):
-        return None
-    normalized = [str(item) for item in value if str(item).strip()][:2]
-    return normalized or None
-
-
-def _resolve_ai_insights_defaults(session_ctx: dict) -> tuple[str, list[str] | None]:
-    default_zone = str(session_ctx.get("zone") or "DE").strip().upper() or "DE"
-    default_date_range = _normalize_context_date_range(session_ctx.get("date_range"))
-
-    latest_params: dict[str, Any] | None = None
-    latest_updated_at = ""
-    candidates = [
-        ("generation_params", "generation_updated_at"),
-        ("load_params", "load_updated_at"),
-        ("carbon_params", "carbon_updated_at"),
-        ("price_params", "price_updated_at"),
-    ]
-    for params_key, updated_key in candidates:
-        params = session_ctx.get(params_key)
-        if not isinstance(params, dict) or not params:
-            continue
-        updated_at = str(session_ctx.get(updated_key) or "")
-        if updated_at >= latest_updated_at:
-            latest_updated_at = updated_at
-            latest_params = params
-
-    if latest_params is None:
-        fallback_generation = session_ctx.get("generation_params")
-        if isinstance(fallback_generation, dict) and fallback_generation:
-            latest_params = fallback_generation
-
-    if not latest_params:
-        return default_zone, default_date_range
-
-    resolved_zone = ""
-    for zone_key in ("zone", "country", "default_country"):
-        zone_value = latest_params.get(zone_key)
-        if isinstance(zone_value, str) and zone_value.strip():
-            resolved_zone = zone_value.strip().upper()
-            break
-
-    resolved_date_range = _normalize_context_date_range(latest_params.get("date_range"))
-    return (resolved_zone or default_zone), (resolved_date_range or default_date_range)
+    context_buffer["updated_at"] = datetime.utcnow().isoformat()
 
 # Professional CSS (kept from original streamlit_carbon_app.py)
 st.markdown(
@@ -665,191 +603,6 @@ def fetch_generation_via_api(zone, start_dt, end_dt):
 
     payload = response.json()
     return int(payload.get("rows_inserted", 0))
-
-
-def table_exists(conn, table_name):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name = %s
-            )
-            """,
-            (table_name,),
-        )
-        row = cur.fetchone()
-    return bool(row[0]) if row else False
-
-
-def ensure_regime_states_table(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS regime_states (
-                time TIMESTAMPTZ NOT NULL,
-                zone VARCHAR(50) NOT NULL,
-                load_tightness NUMERIC,
-                res_penetration NUMERIC,
-                net_import NUMERIC,
-                interconnect_saturation NUMERIC,
-                price_volatility NUMERIC,
-                regime_id INT,
-                regime_name VARCHAR(50),
-                regime_confidence NUMERIC,
-                PRIMARY KEY (time, zone)
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_regime_states_zone_time
-            ON regime_states (zone, time DESC)
-            """
-        )
-
-
-def _fallback_regime_label(res_penetration, net_import, price_volatility):
-    if net_import > 1200 or price_volatility > 15:
-        return 1, "Stressed", 0.55
-    if res_penetration >= 55 and abs(net_import) <= 1000:
-        return 2, "RES-Dominant", 0.55
-    return 0, "Normal", 0.55
-
-
-def bootstrap_regime_states(conn, zone, detector=None, lookback_days=30):
-    ensure_regime_states_table(conn)
-    if not table_exists(conn, "generation_records"):
-        return 0
-
-    has_load = table_exists(conn, "load_records")
-    has_price = table_exists(conn, "price_records")
-    load_select = "COALESCE(l.load_mw, g.total_mw) AS load_mw" if has_load else "g.total_mw AS load_mw"
-    price_select = "p.price_eur_mwh AS price_eur_mwh" if has_price else "NULL::DOUBLE PRECISION AS price_eur_mwh"
-    load_join = "LEFT JOIN load_records l ON l.zone = g.zone AND l.timestamp = g.timestamp" if has_load else ""
-    price_join = "LEFT JOIN price_records p ON p.zone = g.zone AND p.timestamp = g.timestamp" if has_price else ""
-
-    query = f"""
-        SELECT
-            g.timestamp AS time,
-            g.zone,
-            g.wind_mw,
-            g.solar_mw,
-            g.hydro_mw,
-            g.total_mw,
-            {load_select},
-            {price_select}
-        FROM generation_records g
-        {load_join}
-        {price_join}
-        WHERE g.zone = %s
-          AND g.timestamp >= NOW() - make_interval(days => %s)
-        ORDER BY g.timestamp
-    """
-    df = pd.read_sql_query(query, conn, params=(zone, lookback_days))
-    if df.empty:
-        return 0
-
-    numeric_cols = ["wind_mw", "solar_mw", "hydro_mw", "total_mw", "load_mw", "price_eur_mwh"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    capacity = REGIME_ZONE_CAPACITY_MW.get(
-        zone,
-        float(df["total_mw"].quantile(0.95) * 1.2) if not df["total_mw"].dropna().empty else 100000.0,
-    )
-    if capacity <= 0:
-        capacity = 100000.0
-
-    renewable_mw = df["wind_mw"].fillna(0.0) + df["solar_mw"].fillna(0.0) + df["hydro_mw"].fillna(0.0)
-    df["load_tightness"] = df["load_mw"].fillna(df["total_mw"]).fillna(0.0) / capacity
-    df["res_penetration"] = 0.0
-    non_zero = df["total_mw"].fillna(0.0) > 0
-    df.loc[non_zero, "res_penetration"] = (
-        renewable_mw.loc[non_zero] / df.loc[non_zero, "total_mw"].fillna(0.0) * 100.0
-    )
-    df["net_import"] = df["load_mw"].fillna(df["total_mw"]).fillna(0.0) - df["total_mw"].fillna(0.0)
-    df["interconnect_saturation"] = (df["net_import"].abs() / 3000.0 * 100.0).clip(lower=0.0, upper=100.0)
-
-    if df["price_eur_mwh"].notna().sum() >= 6:
-        df["price_volatility"] = (
-            df["price_eur_mwh"].fillna(method="ffill").fillna(method="bfill").fillna(0.0).rolling(24, min_periods=3).std()
-        )
-    else:
-        proxy = df["total_mw"].fillna(method="ffill").fillna(method="bfill").fillna(0.0)
-        df["price_volatility"] = proxy.pct_change().fillna(0.0).rolling(24, min_periods=3).std() * 100.0
-    df["price_volatility"] = df["price_volatility"].fillna(0.0)
-
-    records = []
-    for _, row in df.iterrows():
-        res_pen = float(row.get("res_penetration", 0.0))
-        net_import = float(row.get("net_import", 0.0))
-        price_vol = float(row.get("price_volatility", 0.0))
-        regime_id, regime_name, regime_conf = _fallback_regime_label(res_pen, net_import, price_vol)
-
-        if detector is not None:
-            try:
-                pred = detector.predict_regime(res_pen, net_import, price_vol)
-                regime_id = int(pred.get("regime_id", regime_id))
-                regime_name = str(pred.get("regime_name", regime_name))
-                regime_conf = float(pred.get("confidence", regime_conf))
-            except Exception:
-                pass
-
-        records.append(
-            (
-                row["time"],
-                str(row.get("zone", zone)),
-                float(row.get("load_tightness", 0.0)),
-                res_pen,
-                net_import,
-                float(row.get("interconnect_saturation", 0.0)),
-                price_vol,
-                regime_id,
-                regime_name,
-                regime_conf,
-            )
-        )
-
-    if not records:
-        return 0
-
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur,
-            """
-            INSERT INTO regime_states (
-                time,
-                zone,
-                load_tightness,
-                res_penetration,
-                net_import,
-                interconnect_saturation,
-                price_volatility,
-                regime_id,
-                regime_name,
-                regime_confidence
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (time, zone)
-            DO UPDATE SET
-                load_tightness = EXCLUDED.load_tightness,
-                res_penetration = EXCLUDED.res_penetration,
-                net_import = EXCLUDED.net_import,
-                interconnect_saturation = EXCLUDED.interconnect_saturation,
-                price_volatility = EXCLUDED.price_volatility,
-                regime_id = EXCLUDED.regime_id,
-                regime_name = EXCLUDED.regime_name,
-                regime_confidence = EXCLUDED.regime_confidence
-            """,
-            records,
-            page_size=500,
-        )
-    return len(records)
-
 
 def set_global_range(start_date, end_date):
     st.session_state["global_start"] = start_date
@@ -1400,20 +1153,13 @@ st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 # ══════════════════════════════════════════════════════════════
 
 def render_ai_insights(zone):
-    del zone
     session_ctx = _ensure_analysis_session()
-    insights_zone, insights_date_range = _resolve_ai_insights_defaults(session_ctx)
-    report_session_context = dict(session_ctx)
-    report_session_context["zone"] = insights_zone
-    if insights_date_range is not None:
-        report_session_context["date_range"] = insights_date_range
-
     update_session_context(
         "ai_insights",
         {
-            "zone": insights_zone,
+            "zone": session_ctx.get("zone"),
             "scenario": session_ctx.get("scenario"),
-            "date_range": insights_date_range,
+            "date_range": session_ctx.get("date_range"),
         },
     )
 
@@ -1421,9 +1167,9 @@ def render_ai_insights(zone):
     st.markdown("Generate narrative reports from the full dashboard analysis context.")
     st.info(
         f"""**Current Analysis Session**
-- Zone: {insights_zone}
+- Zone: {session_ctx.get('zone', 'DE')}
 - Scenario: {session_ctx.get('scenario', 'Base Case')}
-- Date range: {insights_date_range or 'Not set'}
+- Date range: {session_ctx.get('date_range') or 'Not set'}
 - Tabs visited: {', '.join(session_ctx.get('visited_tabs', [])) or 'None yet'}
 
 Navigate to other tabs first to build richer context for report generation."""
@@ -1510,7 +1256,7 @@ Navigate to other tabs first to build richer context for report generation."""
             "persona": persona,
             "backend": backend_choice,
             "save_history": True,
-            "session_context": report_session_context,
+            "session_context": session_ctx,
         }
         if model_choice:
             report_request["model"] = model_choice
@@ -1537,7 +1283,6 @@ Navigate to other tabs first to build richer context for report generation."""
         st.success(f"Analysis complete ({report.get('backend', backend_choice)}).")
         if report.get("session_id"):
             session_ctx["session_id"] = report["session_id"]
-            report_session_context["session_id"] = report["session_id"]
         if report.get("report_id"):
             st.success(f"Report saved (ID: {report['report_id'][:8]}...)")
 
@@ -1545,7 +1290,7 @@ Navigate to other tabs first to build richer context for report generation."""
         st.markdown(report.get("narrative", "No narrative returned."))
 
         with st.expander("Analysis context used"):
-            st.json(report_session_context)
+            st.json(session_ctx)
         with st.expander("Data summary"):
             st.json(report.get("data_summary", {}))
 
@@ -2465,31 +2210,85 @@ def render_generation_analytics(country, start_date, end_date):
 
     generation_table = resolve_generation_table(conn, country, start_dt, end_dt)
 
+    def resolve_generation_records_layout(_conn):
+        has_source = table_has_column(_conn, "generation_records", "source")
+        has_quantity = table_has_column(_conn, "generation_records", "quantity")
+        if has_source and has_quantity:
+            return "legacy_source_quantity"
+
+        has_wind = table_has_column(_conn, "generation_records", "wind_mw")
+        has_solar = table_has_column(_conn, "generation_records", "solar_mw")
+        has_hydro = table_has_column(_conn, "generation_records", "hydro_mw")
+        has_total = table_has_column(_conn, "generation_records", "total_mw")
+        if has_wind and has_solar and has_hydro and has_total:
+            return "aggregated_mix"
+
+        return "unknown"
+
+    generation_records_layout = (
+        resolve_generation_records_layout(conn)
+        if generation_table == "generation_records"
+        else "n/a"
+    )
+
     # Load generation data
     @st.cache_data(ttl=600)
-    def load_generation_data(_conn, zone, start, end):
-        logger.info("load_generation_data: table=%s zone=%s start=%s end=%s", generation_table, zone, start, end)
+    def load_generation_data(_conn, zone, start, end, table_name, records_layout):
+        logger.info("load_generation_data: table=%s zone=%s start=%s end=%s", table_name, zone, start, end)
         zone_keys = get_zone_keys(zone)
-        params = (zone_keys, start, end) if generation_table == "generation_actual" else (zone, start, end)
-        query = (
+        if table_name == "generation_actual":
+            params = (zone_keys, start, end)
+            query = """
+                SELECT time, psr_type, actual_generation_mw
+                FROM generation_actual
+                WHERE bidding_zone_mrid = ANY(%s)
+                  AND time >= %s
+                  AND time < %s
+                ORDER BY time, psr_type
             """
-            SELECT time, psr_type, actual_generation_mw
-            FROM generation_actual
-            WHERE bidding_zone_mrid = ANY(%s)
-              AND time >= %s
-              AND time < %s
-            ORDER BY time, psr_type
+        elif records_layout == "legacy_source_quantity":
+            params = (zone, start, end)
+            query = """
+                SELECT timestamp AS time, source AS psr_type, quantity AS actual_generation_mw
+                FROM generation_records
+                WHERE zone = %s
+                  AND timestamp >= %s
+                  AND timestamp < %s
+                ORDER BY timestamp, source
             """
-            if generation_table == "generation_actual"
-            else """
-            SELECT timestamp AS time, source AS psr_type, quantity AS actual_generation_mw
-            FROM generation_records
-            WHERE zone = %s
-              AND timestamp >= %s
-              AND timestamp < %s
-            ORDER BY timestamp, source
+        elif records_layout == "aggregated_mix":
+            params = (zone, start, end)
+            query = """
+                WITH filtered AS (
+                    SELECT
+                        timestamp,
+                        COALESCE(wind_mw, 0) AS wind_mw,
+                        COALESCE(solar_mw, 0) AS solar_mw,
+                        COALESCE(hydro_mw, 0) AS hydro_mw,
+                        COALESCE(total_mw, 0) AS total_mw
+                    FROM generation_records
+                    WHERE zone = %s
+                      AND timestamp >= %s
+                      AND timestamp < %s
+                )
+                SELECT timestamp AS time, 'B19' AS psr_type, wind_mw AS actual_generation_mw FROM filtered
+                UNION ALL
+                SELECT timestamp AS time, 'B18' AS psr_type, solar_mw AS actual_generation_mw FROM filtered
+                UNION ALL
+                SELECT timestamp AS time, 'B11' AS psr_type, hydro_mw AS actual_generation_mw FROM filtered
+                UNION ALL
+                SELECT
+                    timestamp AS time,
+                    'FOSSIL' AS psr_type,
+                    GREATEST(total_mw - wind_mw - solar_mw - hydro_mw, 0) AS actual_generation_mw
+                FROM filtered
+                ORDER BY time, psr_type
             """
-        )
+        else:
+            raise RuntimeError(
+                "Unsupported generation_records schema. Expected either "
+                "(source, quantity) or (wind_mw, solar_mw, hydro_mw, total_mw)."
+            )
         cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
             cur.execute(query, params)
@@ -2510,36 +2309,58 @@ def render_generation_analytics(country, start_date, end_date):
 
     # Load renewable fraction
     @st.cache_data(ttl=600)
-    def load_renewable_fraction(_conn, zone, start, end):
+    def load_renewable_fraction(_conn, zone, start, end, table_name, records_layout):
         zone_keys = get_zone_keys(zone)
-        params = (zone_keys, start, end) if generation_table == "generation_actual" else (zone, start, end)
-        query = (
+        if table_name == "generation_actual":
+            params = (zone_keys, start, end)
+            query = """
+                SELECT
+                    SUM(CASE WHEN psr_type IN ('B01', 'B17', 'B18', 'B19', 'B20')
+                        THEN actual_generation_mw ELSE 0 END) as renewable_gen,
+                    SUM(CASE WHEN psr_type NOT IN ('B01', 'B17', 'B18', 'B19', 'B20')
+                        THEN actual_generation_mw ELSE 0 END) as fossil_gen,
+                    SUM(actual_generation_mw) as total_gen
+                FROM generation_actual
+                WHERE bidding_zone_mrid = ANY(%s)
+                  AND time >= %s
+                  AND time < %s
             """
-            SELECT
-                SUM(CASE WHEN psr_type IN ('B01', 'B17', 'B18', 'B19', 'B20')
-                    THEN actual_generation_mw ELSE 0 END) as renewable_gen,
-                SUM(CASE WHEN psr_type NOT IN ('B01', 'B17', 'B18', 'B19', 'B20')
-                    THEN actual_generation_mw ELSE 0 END) as fossil_gen,
-                SUM(actual_generation_mw) as total_gen
-            FROM generation_actual
-            WHERE bidding_zone_mrid = ANY(%s)
-              AND time >= %s
-              AND time < %s
+        elif records_layout == "legacy_source_quantity":
+            params = (zone, start, end)
+            query = """
+                SELECT
+                    SUM(CASE WHEN source IN ('B01', 'B17', 'B18', 'B19', 'B20')
+                        THEN quantity ELSE 0 END) as renewable_gen,
+                    SUM(CASE WHEN source NOT IN ('B01', 'B17', 'B18', 'B19', 'B20')
+                        THEN quantity ELSE 0 END) as fossil_gen,
+                    SUM(quantity) as total_gen
+                FROM generation_records
+                WHERE zone = %s
+                  AND timestamp >= %s
+                  AND timestamp < %s
             """
-            if generation_table == "generation_actual"
-            else """
-            SELECT
-                SUM(CASE WHEN source IN ('B01', 'B17', 'B18', 'B19', 'B20')
-                    THEN quantity ELSE 0 END) as renewable_gen,
-                SUM(CASE WHEN source NOT IN ('B01', 'B17', 'B18', 'B19', 'B20')
-                    THEN quantity ELSE 0 END) as fossil_gen,
-                SUM(quantity) as total_gen
-            FROM generation_records
-            WHERE zone = %s
-              AND timestamp >= %s
-              AND timestamp < %s
+        elif records_layout == "aggregated_mix":
+            params = (zone, start, end)
+            query = """
+                SELECT
+                    SUM(COALESCE(wind_mw, 0) + COALESCE(solar_mw, 0) + COALESCE(hydro_mw, 0)) AS renewable_gen,
+                    SUM(
+                        GREATEST(
+                            COALESCE(total_mw, 0) - COALESCE(wind_mw, 0) - COALESCE(solar_mw, 0) - COALESCE(hydro_mw, 0),
+                            0
+                        )
+                    ) AS fossil_gen,
+                    SUM(COALESCE(total_mw, 0)) AS total_gen
+                FROM generation_records
+                WHERE zone = %s
+                  AND timestamp >= %s
+                  AND timestamp < %s
             """
-        )
+        else:
+            raise RuntimeError(
+                "Unsupported generation_records schema. Expected either "
+                "(source, quantity) or (wind_mw, solar_mw, hydro_mw, total_mw)."
+            )
         cur = _conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
             cur.execute(query, params)
@@ -2555,8 +2376,15 @@ def render_generation_analytics(country, start_date, end_date):
             cur.close()
         return dict(result) if result else {}
 
-    df = load_generation_data(conn, country, start_dt, end_dt)
-    renewable_stats = load_renewable_fraction(conn, country, start_dt, end_dt)
+    df = load_generation_data(conn, country, start_dt, end_dt, generation_table, generation_records_layout)
+    renewable_stats = load_renewable_fraction(
+        conn,
+        country,
+        start_dt,
+        end_dt,
+        generation_table,
+        generation_records_layout,
+    )
     demo_mode = False
 
     if df.empty:
@@ -2954,8 +2782,23 @@ direction and magnitude, not absolute price, as the insight.
         return
 
     try:
-        has_regime_states = table_exists(conn, "regime_states")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = 'regime_states'
+                )
+                """
+            )
+            has_regime_states = bool(cur.fetchone()[0])
     except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         has_regime_states = False
 
     if not has_regime_states:
@@ -2963,20 +2806,6 @@ direction and magnitude, not absolute price, as the insight.
             "No regime data available yet (`public.regime_states` table is missing). "
             "Run the regime computation pipeline first."
         )
-        if st.button("Initialize regime table from current data", key="init_regime_table"):
-            with st.spinner("Bootstrapping regime states from current time-series data..."):
-                try:
-                    inserted = bootstrap_regime_states(conn, country, detector=detector, lookback_days=30)
-                except Exception as exc:
-                    logger.exception("Failed to bootstrap regime table")
-                    st.error(f"Regime bootstrap failed: {exc}")
-                    inserted = 0
-            if inserted > 0:
-                st.success(f"Initialized regime table with {inserted:,} records for {country}.")
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.warning("No records generated. Ingest generation/load data first, then retry.")
         if st.button("Show demo regime snapshot", key="demo_regime_table_missing"):
             st.subheader("Current Operating Regime (Demo)")
             c1, c2, c3, c4 = st.columns(4)
@@ -3013,20 +2842,6 @@ direction and magnitude, not absolute price, as the insight.
 
     if latest.empty:
         st.info(f"No regime data available for {country}. Run the regime computation pipeline first.")
-        if st.button("Compute regime data for this zone", key="bootstrap_regime_zone"):
-            with st.spinner(f"Computing regime states for {country}..."):
-                try:
-                    inserted = bootstrap_regime_states(conn, country, detector=detector, lookback_days=30)
-                except Exception as exc:
-                    logger.exception("Failed to compute regime data")
-                    st.error(f"Regime bootstrap failed: {exc}")
-                    inserted = 0
-            if inserted > 0:
-                st.success(f"Generated {inserted:,} regime rows for {country}.")
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.warning("No records generated. Ingest generation/load data first, then retry.")
         if st.button("Show demo regime snapshot", key="demo_regime_empty"):
             st.subheader("Current Operating Regime (Demo)")
             c1, c2, c3, c4 = st.columns(4)
@@ -3908,7 +3723,7 @@ def render_health_setup(country, coverage):
 
     st.subheader("Demo Readiness")
     steps = [
-        "Pick a zone with data coverage (DE recommended).",
+        "Pick a zone with data coverage.",
         "Use the suggested recent window in the sidebar.",
         "Run Generation Analytics to confirm charts populate.",
         "Open Grid Regimes & Stress Testing (requires trained models).",

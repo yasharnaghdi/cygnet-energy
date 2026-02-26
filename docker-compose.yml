@@ -74,6 +74,7 @@ services:
       # Database connection
       DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
       CYGNET_API_URL: ${CYGNET_API_URL:-http://api:8001}
+      CYGNET_SESSION_FILE: ${CYGNET_SESSION_FILE:-/app/data/.cygnet_session}
 
       # ENTSO-E API (add your token)
       ENTSOE_API_TOKEN: ${ENTSOE_API_TOKEN:-your-token-here}
@@ -87,6 +88,7 @@ services:
         condition: service_healthy
     volumes:
       # Mount source for development (optional - remove for production)
+      - ./main_app.py:/app/main_app.py
       - ./src:/app/src
       - ./data:/app/data
     networks:

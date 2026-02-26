@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/docker_common.sh"
 
 API_PID_FILE=".api.pid"
 STREAMLIT_PID_FILE=".streamlit.pid"
@@ -73,6 +74,7 @@ ensure_port_available() {
 }
 
 trap cleanup_on_error ERR
+ensure_docker_credential_helper_on_path
 
 if [[ ! -f ".env" ]]; then
   echo "Missing .env file"

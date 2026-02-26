@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/docker_common.sh"
 
 ENV_FILE="${ENV_FILE:-.env.docker}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
@@ -56,6 +57,7 @@ wait_service_healthy() {
 
 require_cmd docker
 require_cmd curl
+ensure_docker_credential_helper_on_path
 
 if ! docker info >/dev/null 2>&1; then
   echo "Docker daemon is not running. Start Docker Desktop and retry."
