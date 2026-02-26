@@ -102,18 +102,25 @@ if "active_page" not in st.session_state:
 if "context_buffer" not in st.session_state:
     st.session_state["context_buffer"] = {}
 
-def _default_analysis_session() -> dict:
+_SESSION_FILE = Path(".cygnet_session")
+
+
+def _default_analysis_session(session_id: str | None = None, started_at: str | None = None) -> dict:
     now_iso = datetime.utcnow().isoformat()
     return {
-        "session_id": str(uuid.uuid4()),
-        "started_at": now_iso,
+        "session_id": session_id or str(uuid.uuid4()),
+        "started_at": started_at or now_iso,
         "updated_at": now_iso,
         "scenario": "Base Case",
         "zone": "DE",
         "date_range": None,
+        "generation_context": {},
         "generation_params": {},
+        "load_context": {},
         "load_params": {},
+        "carbon_context": {},
         "carbon_params": {},
+        "price_context": {},
         "price_params": {},
         "parameter_weights": None,
         "visited_tabs": [],
@@ -121,12 +128,82 @@ def _default_analysis_session() -> dict:
     }
 
 
+def _persist_analysis_session(session: dict) -> None:
+    payload = {
+        "session_id": session.get("session_id"),
+        "started_at": session.get("started_at"),
+        "zone": session.get("zone", "DE"),
+        "scenario": session.get("scenario", "Base Case"),
+        "date_range": session.get("date_range"),
+        "generation_context": session.get("generation_context") or session.get("generation_params") or {},
+        "load_context": session.get("load_context") or session.get("load_params") or {},
+        "carbon_context": session.get("carbon_context") or session.get("carbon_params") or {},
+        "price_context": session.get("price_context") or session.get("price_params") or {},
+        "visited_tabs": session.get("visited_tabs", []),
+        "generated_charts": session.get("generated_charts", []),
+    }
+    try:
+        _SESSION_FILE.write_text(json.dumps(payload, default=str))
+    except Exception as exc:
+        logger.warning("Failed to persist local session file %s: %s", _SESSION_FILE, exc)
+
+
+def _load_or_create_session() -> dict:
+    if _SESSION_FILE.exists():
+        try:
+            data = json.loads(_SESSION_FILE.read_text())
+            if isinstance(data, dict) and data.get("session_id"):
+                session = _default_analysis_session(
+                    session_id=str(data.get("session_id")),
+                    started_at=str(data.get("started_at") or datetime.utcnow().isoformat()),
+                )
+                for key, value in data.items():
+                    session[key] = value
+                return session
+        except Exception:
+            pass
+
+    session = _default_analysis_session()
+    # In production (AWS), session persistence is handled by
+    # user authentication — report history is fetched from S3/RDS
+    # by authenticated user_id. The .cygnet_session file is
+    # a local-dev convenience only and is not used in deployment.
+    _persist_analysis_session(session)
+    return session
+
+
+def _resolve_session_zone_and_dates(session_ctx: dict) -> tuple[str, list[str] | None]:
+    generation_ctx = (
+        session_ctx.get("generation_context")
+        or session_ctx.get("generation_params")
+        or {}
+    )
+    ai_ctx = session_ctx.get("ai_insights_params") or {}
+
+    zone = str(
+        generation_ctx.get("zone")
+        or session_ctx.get("zone")
+        or ai_ctx.get("zone")
+        or "DE"
+    ).strip().upper()
+
+    date_range = (
+        generation_ctx.get("date_range")
+        or session_ctx.get("date_range")
+        or ai_ctx.get("date_range")
+    )
+    return zone, date_range
+
+
 def _ensure_analysis_session() -> dict:
     if "analysis_session" not in st.session_state:
-        st.session_state["analysis_session"] = _default_analysis_session()
+        st.session_state["analysis_session"] = _load_or_create_session()
 
     session = st.session_state["analysis_session"]
-    defaults = _default_analysis_session()
+    defaults = _default_analysis_session(
+        session_id=str(session.get("session_id") or ""),
+        started_at=str(session.get("started_at") or ""),
+    )
     for key, value in defaults.items():
         session.setdefault(key, value)
 
@@ -141,8 +218,22 @@ def _ensure_analysis_session() -> dict:
                 "updated_at",
                 "generated_charts",
                 "visited_tabs",
+                "generation_context",
+                "load_context",
+                "carbon_context",
+                "price_context",
             }:
                 session[key] = value
+
+    session["generation_context"] = session.get("generation_context") or session.get("generation_params") or {}
+    session["generation_params"] = session.get("generation_params") or session["generation_context"]
+    session["load_context"] = session.get("load_context") or session.get("load_params") or {}
+    session["load_params"] = session.get("load_params") or session["load_context"]
+    session["carbon_context"] = session.get("carbon_context") or session.get("carbon_params") or {}
+    session["carbon_params"] = session.get("carbon_params") or session["carbon_context"]
+    session["price_context"] = session.get("price_context") or session.get("price_params") or {}
+    session["price_params"] = session.get("price_params") or session["price_context"]
+    _persist_analysis_session(session)
     return session
 
 
@@ -155,6 +246,14 @@ def update_session_context(tab_name: str, params: dict | None = None, charts: li
 
     if params is not None:
         context_buffer[f"{tab_name}_params"] = params
+        context_key = {
+            "generation": "generation_context",
+            "load": "load_context",
+            "carbon": "carbon_context",
+            "price": "price_context",
+        }.get(tab_name)
+        if context_key:
+            context_buffer[context_key] = params
     if charts:
         existing = set(context_buffer.get("generated_charts", []))
         existing.update(charts)
@@ -1154,12 +1253,20 @@ st.sidebar.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 def render_ai_insights(zone):
     session_ctx = _ensure_analysis_session()
+    resolved_zone, resolved_date_range = _resolve_session_zone_and_dates(session_ctx)
+    session_ctx["zone"] = resolved_zone
+    if resolved_date_range:
+        session_ctx["date_range"] = [str(item) for item in resolved_date_range][:2]
+    if session_ctx.get("generation_context"):
+        session_ctx["generation_params"] = session_ctx["generation_context"]
+    _persist_analysis_session(session_ctx)
+
     update_session_context(
         "ai_insights",
         {
-            "zone": session_ctx.get("zone"),
+            "zone": resolved_zone,
             "scenario": session_ctx.get("scenario"),
-            "date_range": session_ctx.get("date_range"),
+            "date_range": resolved_date_range,
         },
     )
 
@@ -1167,9 +1274,9 @@ def render_ai_insights(zone):
     st.markdown("Generate narrative reports from the full dashboard analysis context.")
     st.info(
         f"""**Current Analysis Session**
-- Zone: {session_ctx.get('zone', 'DE')}
+- Zone: {resolved_zone}
 - Scenario: {session_ctx.get('scenario', 'Base Case')}
-- Date range: {session_ctx.get('date_range') or 'Not set'}
+- Date range: {resolved_date_range or 'Not set'}
 - Tabs visited: {', '.join(session_ctx.get('visited_tabs', [])) or 'None yet'}
 
 Navigate to other tabs first to build richer context for report generation."""
@@ -1283,6 +1390,7 @@ Navigate to other tabs first to build richer context for report generation."""
         st.success(f"Analysis complete ({report.get('backend', backend_choice)}).")
         if report.get("session_id"):
             session_ctx["session_id"] = report["session_id"]
+            _persist_analysis_session(session_ctx)
         if report.get("report_id"):
             st.success(f"Report saved (ID: {report['report_id'][:8]}...)")
 

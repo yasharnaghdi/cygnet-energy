@@ -14,6 +14,7 @@ config/certs/
 logs/
 *.log
 *.pid
+.cygnet_session
 .DS_Store
 *.sqlite
 .idea/
