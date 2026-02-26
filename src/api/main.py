@@ -28,7 +28,11 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://app.cygnet.energy",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
