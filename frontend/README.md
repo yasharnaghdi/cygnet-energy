@@ -124,3 +124,19 @@ npm run build
 - AI shows fallback template:
   - Check selected backend/model in UI.
   - Ensure local LLM service is up (`ollama serve`) or required backend env/deps are present.
+
+## Docker Cleanup (Local Dev)
+
+If Docker cache grows large, you can remove dangling artifacts safely:
+
+```bash
+docker image prune -f
+docker volume prune -f
+```
+
+To inspect before cleanup:
+
+```bash
+docker image ls -f dangling=true
+docker volume ls -qf dangling=true
+```
