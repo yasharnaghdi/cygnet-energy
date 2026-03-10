@@ -30,7 +30,7 @@ export function ReportPanel() {
   const backendStatus = useReportBackendStatus()
   const [drawerOpen, { open, close }] = useDisclosure(false)
   const [narrative, setNarrative] = useState<string | null>(null)
-  const [backendSelection, setBackendSelection] = useState<string>('ollama')
+  const [backendSelection, setBackendSelection] = useState<string>('fallback')
   const [modelSelection, setModelSelection] = useState<string>('')
 
   const backendMeta = useMemo(() => {
@@ -93,12 +93,19 @@ export function ReportPanel() {
 
   useEffect(() => {
     const active = String(backendStatus.data?.active_backend ?? '').trim().toLowerCase()
-    if (active && backendMeta.orderedBackends.includes(active)) {
+    if (
+      // Prefer explicit fallback unless a local backend is clearly usable.
+      backendSelection === 'fallback' &&
+      (active === 'ollama' || active === 'huggingface') &&
+      backendMeta.orderedBackends.includes(active)
+    ) {
       setBackendSelection(active)
       return
     }
     if (!backendMeta.orderedBackends.includes(backendSelection)) {
-      setBackendSelection(backendMeta.orderedBackends[0] ?? 'ollama')
+      setBackendSelection(
+        backendMeta.orderedBackends.includes('fallback') ? 'fallback' : (backendMeta.orderedBackends[0] ?? 'fallback')
+      )
     }
   }, [backendMeta.orderedBackends, backendStatus.data?.active_backend, backendSelection])
 

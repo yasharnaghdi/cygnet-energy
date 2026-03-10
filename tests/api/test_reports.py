@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.routes import reports
+from src.services.llm_client import LLMBackend, UnifiedLLMClient
 
 
 class DummyCursor:
@@ -58,24 +59,49 @@ class FakeLLM:
         return self._text
 
     def get_backend_info(self) -> dict[str, Any]:
-        if self._backend == "ollama":
+        active_backend = self.last_force_backend or self._backend
+        if active_backend == "ollama":
             return {
                 "backend": "ollama",
+                "active_backend": "ollama",
+                "available_backends": [{"type": "ollama", "models": ["llama2:7b"]}, {"type": "fallback", "models": ["template"]}],
+                "available_backend_types": ["ollama", "fallback"],
                 "ollama_url": "http://localhost:11434",
                 "ollama_model": "llama2:7b",
+                "openai_model": None,
                 "hf_model": None,
                 "hf_device": None,
             }
-        if self._backend == "huggingface":
+        if active_backend == "huggingface":
             return {
                 "backend": "huggingface",
+                "active_backend": "huggingface",
+                "available_backends": [{"type": "huggingface", "models": ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]}, {"type": "fallback", "models": ["template"]}],
+                "available_backend_types": ["huggingface", "fallback"],
+                "openai_model": None,
                 "ollama_url": None,
                 "ollama_model": None,
                 "hf_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
                 "hf_device": "cpu",
             }
+        if active_backend == "openai":
+            return {
+                "backend": "openai",
+                "active_backend": "openai",
+                "available_backends": [{"type": "openai", "models": ["gpt-4o-mini"]}, {"type": "fallback", "models": ["template"]}],
+                "available_backend_types": ["openai", "fallback"],
+                "openai_model": "gpt-4o-mini",
+                "ollama_url": None,
+                "ollama_model": None,
+                "hf_model": None,
+                "hf_device": None,
+            }
         return {
             "backend": "fallback",
+            "active_backend": "fallback",
+            "available_backends": [{"type": "fallback", "models": ["template"]}],
+            "available_backend_types": ["fallback"],
+            "openai_model": None,
             "ollama_url": None,
             "ollama_model": None,
             "hf_model": None,
@@ -201,6 +227,22 @@ def test_reports_generate_passes_model_override(monkeypatch) -> None:
     assert fake_llm.last_force_backend == "ollama"
     assert fake_llm.last_force_model == "phi3:mini"
     assert payload["backend_info"]["requested_model"] == "phi3:mini"
+
+
+def test_unified_llm_client_falls_back_when_forced_backend_errors(monkeypatch) -> None:
+    client = UnifiedLLMClient()
+
+    monkeypatch.setattr(client, "_is_backend_available", lambda backend: True)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("openai auth failed")
+
+    monkeypatch.setattr(client, "_generate_with_backend", _boom)
+
+    text = client.generate("test prompt", force_backend="openai")
+
+    assert "Structured summary mode" in text
+    assert client.backend == LLMBackend.FALLBACK
 
 
 def test_reports_generate_with_fallback_backend(monkeypatch) -> None:

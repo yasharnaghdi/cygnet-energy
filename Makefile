@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: start stop restart status logs migrate start-local stop-local
+.PHONY: start stop restart status logs migrate start-local stop-local up down build backend frontend streamlit test backend-test frontend-test streamlit-test
 
 start:
 	./scripts/start_docker.sh
@@ -24,3 +24,32 @@ start-local:
 
 stop-local:
 	./stop_local.sh --stop-db
+
+up:
+	docker compose up -d postgres api frontend app
+
+down:
+	docker compose down
+
+build:
+	docker compose build api frontend app
+
+backend:
+	docker compose up api
+
+frontend:
+	docker compose up frontend
+
+streamlit:
+	docker compose up app
+
+test: backend-test frontend-test streamlit-test
+
+backend-test:
+	poetry run pytest -v tests
+
+frontend-test:
+	cd frontend && npm run test:run
+
+streamlit-test:
+	poetry run pytest -v tests/streamlit
