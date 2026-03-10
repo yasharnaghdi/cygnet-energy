@@ -1,30 +1,9 @@
 import { Alert, Center, Loader, SimpleGrid, Stack, Text } from '@mantine/core'
-import { GenerationPoint } from '../api/generation'
 import { GenerationChart } from '../components/charts/GenerationChart'
 import { RenewableGauge } from '../components/charts/RenewableGauge'
 import { useGeneration } from '../hooks/useGeneration'
+import { summarizeLatestGeneration } from '../features/generation/summary'
 import { useSessionStore } from '../store/sessionStore'
-
-const RENEWABLE_CODES = new Set(['B01', 'B09', 'B10', 'B11', 'B12', 'B15', 'B16', 'B18', 'B19', 'B20'])
-
-function summarizeLatest(points: GenerationPoint[]): { renewablePct: number; totalMw: number } {
-  if (!points.length) {
-    return { renewablePct: 0, totalMw: 0 }
-  }
-
-  const latest = points.reduce((max, p) => (p.time > max ? p.time : max), points[0].time)
-  const latestRows = points.filter((p) => p.time === latest)
-
-  const totalMw = latestRows.reduce((sum, p) => sum + p.quantity, 0)
-  const renewableMw = latestRows
-    .filter((p) => RENEWABLE_CODES.has(p.psr_type))
-    .reduce((sum, p) => sum + p.quantity, 0)
-
-  return {
-    totalMw,
-    renewablePct: totalMw > 0 ? (renewableMw / totalMw) * 100 : 0,
-  }
-}
 
 export function GenerationPage() {
   const { zone, dateRange } = useSessionStore()
@@ -38,7 +17,7 @@ export function GenerationPage() {
     )
   }
 
-  const summary = summarizeLatest(data ?? [])
+  const summary = summarizeLatestGeneration(data ?? [])
 
   return (
     <Stack gap="md">

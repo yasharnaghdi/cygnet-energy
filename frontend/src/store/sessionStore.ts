@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist, StateStorage } from 'zustand/middleware'
 
 export type Zone = 'DE' | 'FR' | 'ES' | 'IT' | 'NL' | 'BE' | 'AT' | 'CH' | 'DK' | 'PL'
 export type Persona = 'trader' | 'operator' | 'ev_owner' | 'policymaker'
@@ -24,6 +24,27 @@ const defaultEnd = new Date().toISOString().slice(0, 10)
 const defaultStart = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)
 const DEFAULT_ZONE: Zone = 'DE'
 const DEFAULT_PERSONA: Persona = 'operator'
+
+const memoryStorage = (): StateStorage => {
+  const store = new Map<string, string>()
+  return {
+    getItem: (name) => store.get(name) ?? null,
+    setItem: (name, value) => {
+      store.set(name, value)
+    },
+    removeItem: (name) => {
+      store.delete(name)
+    },
+  }
+}
+
+function getPersistStorage(): StateStorage {
+  // Vitest/jsdom can expose a partial storage shim; use memory storage there.
+  if (typeof window !== 'undefined' && typeof window.localStorage?.setItem === 'function') {
+    return window.localStorage
+  }
+  return memoryStorage()
+}
 
 function normalizeZone(value: unknown): Zone {
   const zone = String(value ?? '').toUpperCase() as Zone
@@ -75,6 +96,7 @@ export const useSessionStore = create<SessionState>()(
     }),
     {
       name: 'cygnet-session',
+      storage: createJSONStorage(getPersistStorage),
       merge: (persistedState, currentState) => {
         const persisted = (persistedState ?? {}) as Partial<SessionState> & {
           zone?: unknown

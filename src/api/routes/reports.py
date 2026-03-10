@@ -705,10 +705,12 @@ def _generate_report_impl(
         force_model=model,
     )
     backend_info = llm.get_backend_info()
-    selected_backend = backend if backend is not None else str(
+    selected_backend = str(
         backend_info.get("active_backend") or backend_info.get("backend", LLMBackend.FALLBACK.value)
     )
     backend_info["backend"] = selected_backend
+    if backend is not None:
+        backend_info["requested_backend"] = backend
     if model:
         backend_info["requested_model"] = model
     llm_available = selected_backend != LLMBackend.FALLBACK.value

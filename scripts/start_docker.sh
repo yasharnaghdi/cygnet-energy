@@ -75,6 +75,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   fi
 fi
 
+if grep -Eq '^(API_TOKEN=|API_TOKEN=your_entsoe_token_here|API_TOKEN=YOUR_.*)$' "$ENV_FILE"; then
+  echo "Warning: API_TOKEN in $ENV_FILE is still a placeholder."
+fi
+
 if grep -Eq '^(ENTSOE_API_TOKEN=|ENTSOE_API_TOKEN=your_entsoe_token_here|ENTSOE_API_TOKEN=YOUR_.*)$' "$ENV_FILE"; then
   echo "Warning: ENTSOE_API_TOKEN in $ENV_FILE is still a placeholder."
 fi
