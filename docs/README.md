@@ -2,6 +2,10 @@
 
 Current phase status: **Phase 1 complete** ✅
 
+## Recent Developments
+1. `docs/RECENT_DEVELOPMENTS_2026-03-11.md`:
+   - Branch-level summary of the React frontend rollout, AI Insights backend selection, backend/reporting hardening, Docker updates, and CI coverage added on March 11, 2026.
+
 ## Phase Documentation
 1. `docs/PHASE1_SUCCESS_REPORT.md`:
    - Phase 1 delivery summary.
@@ -21,6 +25,7 @@ Current phase status: **Phase 1 complete** ✅
 4. `docs/INGESTION_ANALYSIS.md`: ingestion design and operational notes.
 5. `docs/LLM_SETUP.md`: local Ollama setup and weighted `POST /api/reports/generate` verification for AI Insights.
 6. `docs/LLM_SETUP_COMPLETE.md`: dual-backend setup (Ollama and HuggingFace), weighted AI Insights workflow, and 404/405 troubleshooting.
+7. `frontend/README.md`: React frontend setup, shared session context behavior, local LLM selection, and frontend validation commands.
 
 ## Developer Quick Start
 1. Start FastAPI on `127.0.0.1:8001` (recommended in this repo state).
