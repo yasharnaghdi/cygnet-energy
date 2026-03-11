@@ -2,6 +2,14 @@
 
 All notable changes to the Cygnet Energy baseline are documented here.
 
+## Unreleased - 2026-03-11
+- Added a React + TypeScript frontend under `frontend/` with Generation, Ingestion, and AI Insights flows backed by a shared session store.
+- Added frontend API clients, chart/report components, Vite build configuration, and Vitest coverage for the initial generation analytics flow.
+- Extended AI report generation to support explicit backend/model overrides and improved fallback behavior across the API and service layers.
+- Added generation metrics helpers and legacy route compatibility adjustments required by the new dashboard.
+- Added `Cygnet Full Stack CI` GitHub Actions workflow covering backend tests, frontend build, and frontend test execution on pull requests.
+- Updated local Docker/dev workflow assets and documentation to cover the frontend runtime and recent operational changes.
+
 ## v1.1.0 - 2026-02-08
 - Added production-focused documentation set under `docs/` (`QUICKSTART`, `DEPLOYMENT_SECURE`, `SECURITY`) and a docs index.
 - Added secure deployment artifacts with nginx + oauth2-proxy routing and hardened environment template defaults.

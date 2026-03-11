@@ -195,16 +195,23 @@ class UnifiedLLMClient:
             requested_backend = LLMBackend(force_backend)
             if not self._is_backend_available(requested_backend):
                 raise ValueError(f"{requested_backend.value} backend is not available.")
-            text = self._generate_with_backend(
-                requested_backend,
-                prompt=prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                model_override=force_model,
-            )
+            try:
+                text = self._generate_with_backend(
+                    requested_backend,
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    model_override=force_model,
+                )
+            except Exception as exc:
+                # Forced backend selection should never take down report generation.
+                logger.error("Forced %s generation failed: %s", requested_backend.value, exc)
+                self.backend = LLMBackend.FALLBACK
+                return self._generate_fallback(prompt)
             if text:
                 return text
-            raise RuntimeError(f"{requested_backend.value} generation failed.")
+            self.backend = LLMBackend.FALLBACK
+            return self._generate_fallback(prompt)
 
         if self.backend == LLMBackend.OLLAMA:
             text = self._generate_ollama(
