@@ -7,6 +7,8 @@ Secure grid-carbon infrastructure on ENTSO-E data.
 - Secure deployment: `docs/DEPLOYMENT_SECURE.md`
 - Security model and secret policy: `docs/SECURITY.md`
 - Docs index: `docs/README.md`
+- Frontend developer guide: `frontend/README.md`
+- Recent branch developments: `docs/RECENT_DEVELOPMENTS_2026-03-11.md`
 - Release policy: `RELEASE_POLICY.md`
 
 ## Quickstart
@@ -26,7 +28,13 @@ make logs
 make stop
 ```
 
-## v1.1.0 Scope
+## Current Branch Scope
+- React + TypeScript frontend under `frontend/` replacing the Streamlit dashboard path for active UI work
+- Shared session context across Generation, Ingestion, and AI Insights pages
+- Explicit AI backend/model selection for local Ollama, Hugging Face, OpenAI, and fallback modes
+- Pull-request CI for backend tests, frontend build, and frontend tests
+
+## v1.1.0 Baseline Scope
 - OIDC/JWT auth with JWKS-backed token validation
 - Subject-aware rate limiting
 - `/healthz` and `/readyz` probes
