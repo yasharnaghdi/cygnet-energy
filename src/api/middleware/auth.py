@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from typing import Dict, List
+from uuid import UUID
 
 import requests
 from fastapi import Depends, HTTPException, Request, status
@@ -11,6 +12,7 @@ from jose import JWTError, jwt
 
 from src.api.middleware.auth_dev import get_dev_token
 from src.api.models.schemas import TokenData
+from src.db.constants import SEED_TENANT_ID
 
 _auth_scheme = HTTPBearer(auto_error=False)
 
@@ -144,6 +146,11 @@ def verify_token(
         scope_list = []
 
     roles = _extract_roles(payload)
+    tenant_claim = payload.get("tenant_id")
+    try:
+        tenant_id = UUID(str(tenant_claim)) if tenant_claim else SEED_TENANT_ID
+    except (TypeError, ValueError):
+        tenant_id = SEED_TENANT_ID
 
     _ensure_required(scope_list, required_scopes, "scopes")
     _ensure_required(roles, required_roles, "roles")
@@ -152,6 +159,7 @@ def verify_token(
     request.state.token_sub = subject
     request.state.token_roles = roles
     request.state.token_scopes = scope_list
+    request.state.tenant_id = tenant_id
 
     return TokenData(
         sub=subject,
@@ -160,4 +168,5 @@ def verify_token(
         scopes=scope_list,
         issuer=payload.get("iss"),
         audience=payload.get("aud"),
+        tenant_id=tenant_id,
     )

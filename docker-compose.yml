@@ -35,6 +35,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
       API_TOKEN: ${API_TOKEN:-}
       ENTSOE_API_TOKEN: ${ENTSOE_API_TOKEN:-}
+      EIA_API_KEY: ${EIA_API_KEY:-}
       AUTH_BYPASS_DEV: ${AUTH_BYPASS_DEV:-true}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3:mini}
@@ -79,6 +80,7 @@ services:
       # ENTSO-E API (add your token)
       API_TOKEN: ${API_TOKEN:-}
       ENTSOE_API_TOKEN: ${ENTSOE_API_TOKEN:-your-token-here}
+      EIA_API_KEY: ${EIA_API_KEY:-}
 
       # Python environment
       PYTHONUNBUFFERED: 1
@@ -125,6 +127,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
       API_TOKEN: ${API_TOKEN:-test-token}
+      EIA_API_KEY: ${EIA_API_KEY:-}
       AUTH_BYPASS_DEV: "true"
       PYTHONUNBUFFERED: 1
     depends_on:
@@ -162,6 +165,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cygnet}:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/${POSTGRES_DB:-energy_db}
       API_TOKEN: ${API_TOKEN:-test-token}
+      EIA_API_KEY: ${EIA_API_KEY:-}
       AUTH_BYPASS_DEV: "true"
       PYTHONUNBUFFERED: 1
     depends_on:

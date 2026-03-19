@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, test } from 'vitest'
 import { GenerationPage } from '../src/pages/GenerationPage'
 import { server } from './msw/server'
 import { useSessionStore } from '../src/store/sessionStore'
+import generationFixture from './fixtures/generation_window.json'
 
 function renderPage() {
   const queryClient = new QueryClient({
@@ -42,12 +43,7 @@ describe('GenerationPage', () => {
   test('renders generation analytics summary from API data', async () => {
     server.use(
       http.get('/generation/history', () =>
-        HttpResponse.json([
-          { time: '2025-11-30T22:00:00Z', psr_type: 'B19', actual_generation_mw: 900 },
-          { time: '2025-11-30T23:00:00Z', psr_type: 'B19', actual_generation_mw: 1000 },
-          { time: '2025-11-30T23:00:00Z', psr_type: 'B18', actual_generation_mw: 500 },
-          { time: '2025-11-30T23:00:00Z', psr_type: 'B04', actual_generation_mw: 750 },
-        ])
+        HttpResponse.json(generationFixture)
       )
     )
 
@@ -57,7 +53,7 @@ describe('GenerationPage', () => {
     expect(screen.getByText('2025-11-01 to 2025-11-30')).toBeInTheDocument()
     expect(screen.getByText('Generation Mix (MW)')).toBeInTheDocument()
     expect(screen.getByText('Renewable Share')).toBeInTheDocument()
-    expect(screen.getByText('66.7%')).toBeInTheDocument()
-    expect(screen.getByText('Total generation: 2,250 MW')).toBeInTheDocument()
+    expect(screen.getByText('76.2%')).toBeInTheDocument()
+    expect(screen.getByText('Total generation: 3,150 MW')).toBeInTheDocument()
   })
 })

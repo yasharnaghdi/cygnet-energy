@@ -3,8 +3,11 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import Enum
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
+
+from src.db.constants import SEED_TENANT_ID
 
 
 class CountryCode(str, Enum):
@@ -211,6 +214,7 @@ class TokenData(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     issuer: Optional[str] = None
     audience: Optional[str] = None
+    tenant_id: UUID = Field(default_factory=lambda: SEED_TENANT_ID)
 
 
 class ErrorResponse(BaseModel):

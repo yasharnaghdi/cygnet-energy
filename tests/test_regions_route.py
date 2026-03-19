@@ -22,8 +22,9 @@ def test_regions_default_entsoe() -> None:
 
 def test_regions_eia_from_db(monkeypatch) -> None:
     class DummyCursor:
-        def execute(self, query: str) -> None:
+        def execute(self, query: str, params=None) -> None:
             self.query = query
+            self.params = params
 
         def fetchall(self):
             return [("CA",), ("TX",), ("NY",)]

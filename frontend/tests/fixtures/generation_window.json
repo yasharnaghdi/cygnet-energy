@@ -1,0 +1,6 @@
+[
+  { "time": "2025-11-30T22:00:00Z", "psr_type": "B19", "actual_generation_mw": 900 },
+  { "time": "2025-11-30T23:00:00Z", "psr_type": "B19", "actual_generation_mw": 1000 },
+  { "time": "2025-11-30T23:00:00Z", "psr_type": "B18", "actual_generation_mw": 500 },
+  { "time": "2025-11-30T23:00:00Z", "psr_type": "B04", "actual_generation_mw": 750 }
+]

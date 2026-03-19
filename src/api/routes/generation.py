@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, Query
 from src.api.middleware.auth import verify_token
 from src.api.models.schemas import CountryCode, TokenData
 from src.db.connection import get_connection
-from src.utils.zones import get_zone_keys
 
 router = APIRouter(prefix="/api/generation", tags=["Generation"])
 
@@ -25,26 +24,27 @@ async def latest_generation(
     zone: CountryCode = Query(default=CountryCode.DE),
     token: TokenData = Depends(verify_token),
 ) -> dict[str, Any]:
-    del token
     conn = get_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cur.execute(
             """
             WITH latest_ts AS (
-                SELECT MAX(time) AS ts
-                FROM generation_actual
-                WHERE bidding_zone_mrid = ANY(%s)
+                SELECT MAX(timestamp) AS ts
+                FROM generation_records
+                WHERE zone = %s
+                  AND tenant_id = %s
             )
             SELECT
-                g.time AS timestamp,
-                SUM(g.actual_generation_mw) AS total_mw
-            FROM generation_actual g
-            JOIN latest_ts l ON l.ts = g.time
-            WHERE g.bidding_zone_mrid = ANY(%s)
-            GROUP BY g.time
+                g.timestamp AS timestamp,
+                g.total_mw AS total_mw
+            FROM generation_records g
+            JOIN latest_ts l ON l.ts = g.timestamp
+            WHERE g.zone = %s
+              AND g.tenant_id = %s
+            LIMIT 1
             """,
-            (get_zone_keys(zone.value), get_zone_keys(zone.value)),
+            (zone.value, token.tenant_id, zone.value, token.tenant_id),
         )
         row = cur.fetchone()
     finally:

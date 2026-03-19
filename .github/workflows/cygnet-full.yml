@@ -6,6 +6,7 @@ on:
       - main
       - master
   pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -23,12 +24,20 @@ jobs:
       - name: Install backend dependencies
         run: poetry install --with dev --no-interaction --no-ansi
 
-      - name: Run backend and shared Python tests
+      - name: Run backend tests
         env:
           API_TOKEN: test-token
+          ENTSOE_API_TOKEN: test-token
+          EIA_API_KEY: test-key
           AUTH_BYPASS_DEV: "true"
           DATABASE_URL: postgresql://user:pass@localhost:5432/cygnet_energy
-        run: poetry run pytest -v tests
+        run: poetry run pytest -v tests/api tests/services tests/test_api.py tests/test_regions_route.py tests/test_db_connection.py --cov=src --cov-report=xml
+
+      - name: Upload backend coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
 
   frontend:
     runs-on: ubuntu-latest
@@ -54,16 +63,66 @@ jobs:
         run: npm run test:run
 
       - name: Upload frontend artifact
-        if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
           path: frontend/dist
 
+      - name: Upload frontend coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+
+  streamlit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install backend dependencies
+        run: poetry install --with dev --no-interaction --no-ansi
+
+      - name: Run Streamlit parity tests
+        env:
+          API_TOKEN: test-token
+          ENTSOE_API_TOKEN: test-token
+          EIA_API_KEY: test-key
+          AUTH_BYPASS_DEV: "true"
+          DATABASE_URL: postgresql://user:pass@localhost:5432/cygnet_energy
+        run: poetry run pytest -v tests/streamlit
+
+  stack-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stack
+        run: docker compose -p cygnet-ci -f docker-compose.test.yml up -d postgres api frontend app
+
+      - name: Run smoke checks
+        run: ./scripts/stack_smoke.sh
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -p cygnet-ci -f docker-compose.test.yml logs --tail=200
+
+      - name: Stop stack
+        if: always()
+        run: docker compose -p cygnet-ci -f docker-compose.test.yml down -v
+
   deploy-staging:
     needs:
       - backend
       - frontend
+      - streamlit
+      - stack-smoke
     if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:

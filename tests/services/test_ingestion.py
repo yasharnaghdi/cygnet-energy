@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from src.db.constants import SEED_TENANT_ID
 from src.services.ingestion import EntsoEIngestionService
 
 
@@ -30,7 +31,8 @@ class DummySession:
         self.closed = True
 
 
-def test_fetch_and_store_aggregates_and_persists(monkeypatch) -> None:
+def test_fetch_and_store_aggregates_and_persists(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
     generation_df = pd.DataFrame(
         [
             {"time": datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc), "psr_type": "B18", "actual_generation_mw": 100.0},
@@ -60,6 +62,7 @@ def test_fetch_and_store_aggregates_and_persists(monkeypatch) -> None:
         zone="DE",
         start=datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc),
         end=datetime(2026, 2, 1, 1, 0, tzinfo=timezone.utc),
+        tenant_id=SEED_TENANT_ID,
     )
 
     assert result["zone"] == "DE"
@@ -71,7 +74,8 @@ def test_fetch_and_store_aggregates_and_persists(monkeypatch) -> None:
     assert session.closed is True
 
 
-def test_fetch_and_store_empty_payload(monkeypatch) -> None:
+def test_fetch_and_store_empty_payload(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
     monkeypatch.setattr("src.services.ingestion.EntsoEXMLParser.parse_generation_xml", lambda xml: None)
     monkeypatch.setattr("src.services.ingestion.EntsoEXMLParser.parse_load_xml", lambda xml: None)
 
@@ -80,6 +84,7 @@ def test_fetch_and_store_empty_payload(monkeypatch) -> None:
         zone="DE",
         start=datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc),
         end=datetime(2026, 2, 1, 1, 0, tzinfo=timezone.utc),
+        tenant_id=SEED_TENANT_ID,
     )
 
     assert result["generation_records"] == 0

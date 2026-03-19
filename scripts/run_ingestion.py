@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main() -> None:
+    from src.db.constants import SEED_TENANT_ID
     from src.services.ingestion import EntsoEIngestionService
 
     token = os.getenv("ENTSOE_API_TOKEN")
@@ -36,7 +37,7 @@ def main() -> None:
 
             for zone in zones:
                 print(f"\nFetching {zone}: {start.date()} to {end.date()}")
-                service.fetch_and_store(zone, start, end)
+                service.fetch_and_store(zone, start, end, tenant_id=SEED_TENANT_ID)
                 print(f"{zone} complete")
 
             print("\nNext run in 15 minutes...")

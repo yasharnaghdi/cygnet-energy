@@ -1,4 +1,4 @@
-import { Badge, Button, Group, Paper, Stack, Table, Text } from '@mantine/core'
+import { Alert, Badge, Button, Group, Paper, Stack, Table, Text } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ingestApi } from '../api/ingest'
@@ -7,7 +7,7 @@ import { useSessionStore } from '../store/sessionStore'
 
 export function IngestionPage() {
   const { zone, dateRange } = useSessionStore()
-  const { data: status } = useIngestStatus()
+  const { data: status, isError: statusIsError, error: statusError } = useIngestStatus()
   const queryClient = useQueryClient()
   const [start, end] = dateRange
 
@@ -56,6 +56,13 @@ export function IngestionPage() {
         <Text fw={600} size="sm" mb="sm">
           DB Status by Zone
         </Text>
+        {statusIsError && (
+          <Alert color="red" title="Status unavailable" mb="sm">
+            {statusError instanceof Error
+              ? statusError.message
+              : 'Failed to read ingest status from the API.'}
+          </Alert>
+        )}
         <Table>
           <Table.Thead>
             <Table.Tr>

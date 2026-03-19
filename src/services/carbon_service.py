@@ -11,9 +11,11 @@ Formula:
 from typing import TYPE_CHECKING
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
+from uuid import UUID
 from src.utils.zones import get_zone_keys
 import logging
 
+from src.db.constants import SEED_TENANT_ID
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,16 @@ class CarbonIntensityService:
         """
         self.conn = db_connection
 
+    def _resolve_tenant(self, tenant_id: UUID | str | None) -> UUID:
+        if tenant_id is None:
+            return SEED_TENANT_ID
+        if isinstance(tenant_id, UUID):
+            return tenant_id
+        try:
+            return UUID(str(tenant_id))
+        except (TypeError, ValueError):
+            return SEED_TENANT_ID
+
     def _fetch_from_api(self, country: str) -> Optional[Dict]:
         """Fetch real-time data from ENTSO-E API"""
 
@@ -132,43 +144,48 @@ class CarbonIntensityService:
             return None
 
 
-    def get_current_intensity(self, country: str) -> Optional[Dict]:
+    def get_current_intensity(self, country: str, tenant_id: UUID | str | None = None) -> Optional[Dict]:
         """Get current CO2 intensity - tries database first, then API"""
 
         try:
+            resolved_tenant = self._resolve_tenant(tenant_id)
             cursor = self.conn.cursor()
             zone_keys = get_zone_keys(country)
 
             cursor.execute("""
-                SELECT time, psr_type, actual_generation_mw
-                FROM generation_actual
-                WHERE bidding_zone_mrid = ANY(%s)
-                AND time = (
-                    SELECT MAX(time)
-                    FROM generation_actual
-                    WHERE bidding_zone_mrid = ANY(%s)
+                SELECT timestamp, wind_mw, solar_mw, hydro_mw, total_mw
+                FROM generation_records
+                WHERE zone = ANY(%s)
+                  AND tenant_id = %s
+                  AND timestamp = (
+                    SELECT MAX(timestamp)
+                    FROM generation_records
+                    WHERE zone = ANY(%s)
+                      AND tenant_id = %s
                 )
-                ORDER BY time DESC, psr_type
-            """, (zone_keys, zone_keys))
+                ORDER BY timestamp DESC
+            """, (zone_keys, resolved_tenant, zone_keys, resolved_tenant))
 
             rows = cursor.fetchall()
             cursor.close()
 
             if rows:
-                generation_mix = {}
-                total_generation = 0
-
-                for row in rows:
-                    time, psr_type, mw = row
-                    generation_mix[psr_type] = mw
-                    total_generation += mw
-
+                time, wind_mw, solar_mw, hydro_mw, total_mw = rows[0]
+                renewable_total = float(wind_mw or 0) + float(solar_mw or 0) + float(hydro_mw or 0)
+                fossil_total = max(float(total_mw or 0) - renewable_total, 0.0)
+                generation_mix = {
+                    "B19": float(wind_mw or 0),
+                    "B18": float(solar_mw or 0),
+                    "B11": float(hydro_mw or 0),
+                    "B04": fossil_total,
+                }
+                total_generation = float(total_mw or 0)
                 if total_generation > 0:
                     co2_intensity = self._calculate_intensity(generation_mix, total_generation)
                     renewable_pct = self._get_renewable_pct(generation_mix, total_generation)
 
                     return {
-                        'timestamp': rows[0][0],
+                        'timestamp': time,
                         'country': country,
                         'co2_intensity': round(co2_intensity, 2),
                         'generation_mix': self._format_mix(generation_mix),
@@ -187,7 +204,12 @@ class CarbonIntensityService:
             logger.error(f"Error getting intensity: {e}")
             return self._fetch_from_api(country)
 
-    def get_24h_forecast(self, country: str, hours: int = 24) -> Optional["pd.DataFrame"]:
+    def get_24h_forecast(
+        self,
+        country: str,
+        hours: int = 24,
+        tenant_id: UUID | str | None = None,
+    ) -> Optional["pd.DataFrame"]:
         """
         Get CO2 intensity forecast for next N hours (based on historical patterns)
 
@@ -199,22 +221,26 @@ class CarbonIntensityService:
             DataFrame with columns: [timestamp, co2_intensity, status, renewable_pct]
         """
         try:
+            resolved_tenant = self._resolve_tenant(tenant_id)
             cursor = self.conn.cursor()
             zone_keys = get_zone_keys(country)
 
             # Get average generation by hour of day for past 30 days
             cursor.execute("""
                 SELECT
-                    EXTRACT(HOUR FROM time)::int as hour_of_day,
-                    psr_type,
-                    AVG(actual_generation_mw) as avg_generation
-                FROM generation_actual
-                WHERE bidding_zone_mrid = ANY(%s)
-                AND time >= NOW() - INTERVAL '30 days'
-                AND time < NOW()
-                GROUP BY hour_of_day, psr_type
-                ORDER BY hour_of_day, psr_type
-            """, (zone_keys,))
+                    EXTRACT(HOUR FROM timestamp)::int as hour_of_day,
+                    AVG(COALESCE(wind_mw, 0)) as avg_wind_mw,
+                    AVG(COALESCE(solar_mw, 0)) as avg_solar_mw,
+                    AVG(COALESCE(hydro_mw, 0)) as avg_hydro_mw,
+                    AVG(COALESCE(total_mw, 0)) as avg_total_mw
+                FROM generation_records
+                WHERE zone = ANY(%s)
+                  AND tenant_id = %s
+                  AND timestamp >= NOW() - INTERVAL '30 days'
+                  AND timestamp < NOW()
+                GROUP BY hour_of_day
+                ORDER BY hour_of_day
+            """, (zone_keys, resolved_tenant))
 
             rows = cursor.fetchall()
             cursor.close()
@@ -237,10 +263,20 @@ class CarbonIntensityService:
                 total_gen = 0
 
                 for row in rows:
-                    h, psr_type, avg_gen = row
+                    h, avg_wind_mw, avg_solar_mw, avg_hydro_mw, avg_total_mw = row
                     if h == hour_of_day:
-                        mix[psr_type] = avg_gen
-                        total_gen += avg_gen
+                        wind_mw = float(avg_wind_mw or 0)
+                        solar_mw = float(avg_solar_mw or 0)
+                        hydro_mw = float(avg_hydro_mw or 0)
+                        total_gen = float(avg_total_mw or 0)
+                        residual = max(total_gen - wind_mw - solar_mw - hydro_mw, 0.0)
+                        mix = {
+                            "B19": wind_mw,
+                            "B18": solar_mw,
+                            "B11": hydro_mw,
+                            "B04": residual,
+                        }
+                        break
 
                 if total_gen > 0:
                     intensity = self._calculate_intensity(mix, total_gen)
@@ -260,7 +296,12 @@ class CarbonIntensityService:
             logger.error(f"Forecast error: {e}")
             return self._forecast_from_live_api(country, hours)
 
-    def get_green_hours(self, country: str, threshold: float = 200) -> Optional[Dict]:
+    def get_green_hours(
+        self,
+        country: str,
+        threshold: float = 200,
+        tenant_id: UUID | str | None = None,
+    ) -> Optional[Dict]:
         """
         Identify "green hours" - times when CO2 intensity is below threshold
 
@@ -281,7 +322,7 @@ class CarbonIntensityService:
         """
         import pandas as pd
 
-        forecast_df = self.get_24h_forecast(country)
+        forecast_df = self.get_24h_forecast(country, tenant_id=tenant_id)
 
         if forecast_df is None or forecast_df.empty:
             return None

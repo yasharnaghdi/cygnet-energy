@@ -6,6 +6,7 @@ from typing import List
 from fastapi import Request
 
 from src.api.models.schemas import TokenData
+from src.db.constants import SEED_TENANT_ID
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -32,9 +33,11 @@ def get_dev_token(request: Request) -> TokenData | None:
         scopes=_split_csv(os.getenv("AUTH_BYPASS_SCOPES"), ["api.read"]),
         issuer="auth-bypass-dev",
         audience=os.getenv("OIDC_AUDIENCE") or "cygnet-api",
+        tenant_id=SEED_TENANT_ID,
     )
 
     request.state.token_sub = token.sub
     request.state.token_roles = token.roles
     request.state.token_scopes = token.scopes
+    request.state.tenant_id = token.tenant_id
     return token

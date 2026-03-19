@@ -2,13 +2,13 @@ import { Badge, Button, Group, Loader, Paper, Select, Stack, Text, TextInput, Te
 import { useDisclosure } from '@mantine/hooks'
 import { IconSparkles } from '@tabler/icons-react'
 import { useEffect, useMemo, useState } from 'react'
+import { renewablePsrCodeSet } from '../../features/generation/renewableCodes'
 import { useGeneration } from '../../hooks/useGeneration'
 import { useGenerateReport, useReportBackendStatus } from '../../hooks/useReports'
 import { useSessionStore } from '../../store/sessionStore'
 import { PersonaSelector } from './PersonaSelector'
 import { ReportHistoryDrawer } from './ReportHistoryDrawer'
 
-const RENEWABLE_PSR_TYPES = new Set(['B11', 'B16', 'B18', 'B19'])
 const DEFAULT_BACKENDS = ['ollama', 'huggingface', 'openai', 'fallback'] as const
 const BACKEND_LABEL: Record<string, string> = {
   ollama: 'Ollama (Local)',
@@ -124,7 +124,7 @@ export function ReportPanel() {
     const generationRows = generation.data ?? []
     const totalGeneration = generationRows.reduce((sum, row) => sum + Number(row.quantity ?? 0), 0)
     const renewableGeneration = generationRows.reduce((sum, row) => {
-      if (RENEWABLE_PSR_TYPES.has(row.psr_type)) {
+      if (renewablePsrCodeSet.has(row.psr_type)) {
         return sum + Number(row.quantity ?? 0)
       }
       return sum
