@@ -75,6 +75,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   fi
 fi
 
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  python3 "$ROOT_DIR/scripts/setup_env.py" --quiet || true
+fi
+
 if grep -Eq '^(API_TOKEN=|API_TOKEN=your_entsoe_token_here|API_TOKEN=YOUR_.*)$' "$ENV_FILE"; then
   echo "Warning: API_TOKEN in $ENV_FILE is still a placeholder."
 fi
@@ -85,6 +89,10 @@ fi
 
 if grep -Eq '^(OPENAI_API_KEY=|OPENAI_API_KEY=sk-\.\.\.|OPENAI_API_KEY=your_openai_key_here)$' "$ENV_FILE"; then
   echo "Warning: OPENAI_API_KEY in $ENV_FILE is empty. OpenAI backend will be unavailable."
+fi
+
+if grep -Eq '^(EIA_API_KEY=|EIA_API_KEY=your_eia_key_here|EIA_API_KEY=YOUR_.*)$' "$ENV_FILE"; then
+  echo "Warning: EIA_API_KEY in $ENV_FILE is empty. EIA ingestion will be unavailable."
 fi
 
 echo "Starting Docker stack..."

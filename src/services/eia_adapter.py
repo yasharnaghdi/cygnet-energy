@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin
 
+import psycopg2
 import requests
 
 EIA_BASE = "https://api.eia.gov/v2/"
@@ -257,6 +258,13 @@ class EIAAdapter:
                 prepared_records,
             )
             conn.commit()
+        except psycopg2.errors.UndefinedTable as exc:
+            conn.rollback()
+            raise RuntimeError(
+                "canonical_metrics is missing. Run the latest database migrations "
+                "(for example: `poetry run alembic upgrade head` or the Docker migration step) "
+                "and retry EIA ingestion."
+            ) from exc
         except Exception:
             conn.rollback()
             raise

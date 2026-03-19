@@ -4,19 +4,17 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 import psycopg2.extras
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src.api.middleware.auth import verify_token
 from src.api.models.schemas import TokenData
 from src.db.connection import get_connection
+from src.db.constants import SEED_TENANT_ID
 from src.services.ingestion import DATA_FRESHNESS
-from src.utils.zones import get_zone_keys
 
 router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
 metrics_router = APIRouter(prefix="/api", tags=["Metrics"])
-
-RENEWABLE_TYPES = ("B01", "B17", "B18", "B19", "B20")
 
 
 def _bounds(start_date: date, end_date: date) -> tuple[datetime, datetime]:
@@ -32,7 +30,6 @@ async def renewable_fraction(
     end_date: date = Query(...),
     token: TokenData = Depends(verify_token),
 ) -> list[dict[str, Any]]:
-    del token
     start_dt, end_dt = _bounds(start_date, end_date)
 
     conn = get_connection()
@@ -40,28 +37,21 @@ async def renewable_fraction(
     try:
         cur.execute(
             """
-            WITH hourly AS (
-                SELECT
-                    time AS timestamp,
-                    SUM(actual_generation_mw) AS total_mw,
-                    SUM(
-                        CASE WHEN psr_type = ANY(%s)
-                        THEN actual_generation_mw ELSE 0 END
-                    ) AS renewable_mw
-                FROM generation_actual
-                WHERE bidding_zone_mrid = ANY(%s)
-                  AND time >= %s
-                  AND time < %s
-                  AND quality_code = 'A'
-                GROUP BY time
-            )
             SELECT
                 timestamp,
-                ROUND((renewable_mw / NULLIF(total_mw, 0)) * 100.0, 2) AS renewable_pct
-            FROM hourly
+                ROUND(
+                    ((COALESCE(wind_mw, 0) + COALESCE(solar_mw, 0) + COALESCE(hydro_mw, 0))
+                    / NULLIF(total_mw, 0)) * 100.0,
+                    2
+                ) AS renewable_pct
+            FROM generation_records
+            WHERE zone = %s
+              AND tenant_id = %s
+              AND timestamp >= %s
+              AND timestamp < %s
             ORDER BY timestamp
             """,
-            (list(RENEWABLE_TYPES), get_zone_keys(zone), start_dt, end_dt),
+            (zone, token.tenant_id, start_dt, end_dt),
         )
         rows = cur.fetchall()
     finally:
@@ -80,7 +70,6 @@ async def tight_hours(
     days: int = Query(default=7, ge=1, le=365),
     token: TokenData = Depends(verify_token),
 ) -> list[dict[str, Any]]:
-    del token
     start_dt = datetime.now(timezone.utc) - timedelta(days=days)
 
     conn = get_connection()
@@ -90,21 +79,21 @@ async def tight_hours(
             """
             WITH generation_hourly AS (
                 SELECT
-                    time AS timestamp,
-                    SUM(actual_generation_mw) AS generation_mw
-                FROM generation_actual
-                WHERE bidding_zone_mrid = ANY(%s)
-                  AND time >= %s
-                GROUP BY time
+                    timestamp,
+                    total_mw AS generation_mw
+                FROM generation_records
+                WHERE zone = %s
+                  AND tenant_id = %s
+                  AND timestamp >= %s
             ),
             load_hourly AS (
                 SELECT
-                    time AS timestamp,
-                    SUM(load_consumption_mw) AS load_mw
-                FROM load_actual
-                WHERE bidding_zone_mrid = ANY(%s)
-                  AND time >= %s
-                GROUP BY time
+                    timestamp,
+                    load_mw
+                FROM load_records
+                WHERE zone = %s
+                  AND tenant_id = %s
+                  AND timestamp >= %s
             )
             SELECT
                 g.timestamp,
@@ -116,7 +105,7 @@ async def tight_hours(
             WHERE (g.generation_mw - l.load_mw) < 100
             ORDER BY g.timestamp DESC
             """,
-            (get_zone_keys(zone), start_dt, get_zone_keys(zone), start_dt),
+            (zone, token.tenant_id, start_dt, zone, token.tenant_id, start_dt),
         )
         rows = cur.fetchall()
     finally:
@@ -136,7 +125,8 @@ async def tight_hours(
 
 
 @metrics_router.get("/metrics")
-async def prometheus_metrics() -> Response:
+async def prometheus_metrics(request: Request) -> Response:
+    tenant_id = getattr(request.state, "tenant_id", SEED_TENANT_ID)
     conn = None
     cur = None
     try:
@@ -146,8 +136,10 @@ async def prometheus_metrics() -> Response:
             """
             SELECT zone, MAX(timestamp) AS max_timestamp
             FROM generation_records
+            WHERE tenant_id = %s
             GROUP BY zone
-            """
+            """,
+            (tenant_id,),
         )
         rows = cur.fetchall()
         now = datetime.now(timezone.utc)

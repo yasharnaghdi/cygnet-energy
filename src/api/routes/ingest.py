@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -35,7 +36,7 @@ class IngestGenerationResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
-def _delete_existing_rows(zone: str, start: datetime, end: datetime) -> None:
+def _delete_existing_rows(zone: str, start: datetime, end: datetime, tenant_id: UUID) -> None:
     engine = get_db_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -43,22 +44,24 @@ def _delete_existing_rows(zone: str, start: datetime, end: datetime) -> None:
                 """
                 DELETE FROM generation_records
                 WHERE zone = :zone
+                  AND tenant_id = :tenant_id
                   AND timestamp >= :start
                   AND timestamp <= :end
                 """
             ),
-            {"zone": zone, "start": start, "end": end},
+            {"zone": zone, "tenant_id": tenant_id, "start": start, "end": end},
         )
         conn.execute(
             text(
                 """
                 DELETE FROM load_records
                 WHERE zone = :zone
+                  AND tenant_id = :tenant_id
                   AND timestamp >= :start
                   AND timestamp <= :end
                 """
             ),
-            {"zone": zone, "start": start, "end": end},
+            {"zone": zone, "tenant_id": tenant_id, "start": start, "end": end},
         )
 
 
@@ -67,7 +70,6 @@ async def ingest_generation(
     payload: IngestGenerationRequest,
     token: TokenData = Depends(verify_token),
 ) -> IngestGenerationResponse:
-    del token
     configured_token = (
         os.getenv("ENTSO_E_API_TOKEN")
         or os.getenv("ENTSOE_API_TOKEN")
@@ -88,11 +90,16 @@ async def ingest_generation(
         raise HTTPException(status_code=400, detail="end must be greater than start")
 
     if payload.overwrite:
-        _delete_existing_rows(zone, payload.start, payload.end)
+        _delete_existing_rows(zone, payload.start, payload.end, token.tenant_id)
 
     service = EntsoEIngestionService()
     try:
-        result = service.fetch_and_store(zone=zone, start=payload.start, end=payload.end)
+        result = service.fetch_and_store(
+            zone=zone,
+            start=payload.start,
+            end=payload.end,
+            tenant_id=token.tenant_id,
+        )
     except Exception as exc:
         logger.exception("Failed ENTSO-E ingestion for zone %s", zone)
         raise HTTPException(status_code=502, detail=f"Ingestion failed: {exc}") from exc
@@ -115,7 +122,6 @@ async def ingest_generation(
 
 @router.get("/status")
 async def ingest_status(token: TokenData = Depends(verify_token)) -> dict[str, object]:
-    del token
     engine = get_db_engine()
     try:
         with engine.connect() as conn:
@@ -124,10 +130,12 @@ async def ingest_status(token: TokenData = Depends(verify_token)) -> dict[str, o
                     """
                     SELECT zone, COUNT(*) AS rows, MAX(timestamp) AS latest
                     FROM generation_records
+                    WHERE tenant_id = :tenant_id
                     GROUP BY zone
                     ORDER BY zone
                     """
-                )
+                ),
+                {"tenant_id": token.tenant_id},
             )
             zones = [
                 {

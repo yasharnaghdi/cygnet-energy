@@ -2,7 +2,7 @@ import { Alert, Center, Loader, SimpleGrid, Stack, Text } from '@mantine/core'
 import { GenerationChart } from '../components/charts/GenerationChart'
 import { RenewableGauge } from '../components/charts/RenewableGauge'
 import { useGeneration } from '../hooks/useGeneration'
-import { summarizeLatestGeneration } from '../features/generation/summary'
+import { summarizeGenerationWindow } from '../features/generation/summary'
 import { useSessionStore } from '../store/sessionStore'
 
 export function GenerationPage() {
@@ -17,7 +17,7 @@ export function GenerationPage() {
     )
   }
 
-  const summary = summarizeLatestGeneration(data ?? [])
+  const summary = summarizeGenerationWindow(data ?? [])
 
   return (
     <Stack gap="md">

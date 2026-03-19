@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from uuid import UUID
 
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from src.db.constants import SEED_TENANT_ID
 
 
 class Base(DeclarativeBase):
@@ -18,6 +21,12 @@ class GenerationRecord(Base):
         Index("idx_generation_records_zone_timestamp", "zone", "timestamp"),
     )
 
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        default=SEED_TENANT_ID,
+        index=True,
+    )
     zone: Mapped[str] = mapped_column(Text, primary_key=True, index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, index=True)
     wind_mw: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -32,6 +41,12 @@ class LoadRecord(Base):
         Index("idx_load_records_zone_timestamp", "zone", "timestamp"),
     )
 
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        default=SEED_TENANT_ID,
+        index=True,
+    )
     zone: Mapped[str] = mapped_column(Text, primary_key=True, index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, index=True)
     load_mw: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -43,6 +58,12 @@ class PriceRecord(Base):
         Index("idx_price_records_zone_timestamp", "zone", "timestamp"),
     )
 
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        default=SEED_TENANT_ID,
+        index=True,
+    )
     zone: Mapped[str] = mapped_column(Text, primary_key=True, index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, index=True)
     price_eur_mwh: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -86,6 +107,12 @@ class ReportHistory(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        default=SEED_TENANT_ID,
+        index=True,
+    )
     session_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("report_sessions.session_id", ondelete="CASCADE"),
@@ -127,3 +154,56 @@ class ReportHistory(Base):
     )
 
     session: Mapped["ReportSession"] = relationship(back_populates="reports")
+
+
+class RegimeState(Base):
+    __tablename__ = "regime_states"
+    __table_args__ = (
+        Index("idx_regime_states_zone_time", "zone", "time"),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        default=SEED_TENANT_ID,
+        index=True,
+    )
+    time: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    zone: Mapped[str] = mapped_column(String(50), primary_key=True)
+    load_tightness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    res_penetration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_import: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interconnect_saturation: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_volatility: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    regime_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    regime_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class CanonicalMetric(Base):
+    __tablename__ = "canonical_metrics"
+    __table_args__ = (
+        Index("idx_canonical_metrics_region_time", "region_type", "region_id", "timestamp_utc"),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        default=SEED_TENANT_ID,
+        index=True,
+    )
+    timestamp_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    region_type: Mapped[str] = mapped_column(String(20), primary_key=True)
+    region_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    granularity: Mapped[str] = mapped_column(String(20), primary_key=True)
+    metric_name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    metric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metric_unit: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    source: Mapped[str] = mapped_column(String(50), primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(100), primary_key=True)
+    facets: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    ingestion_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        server_default=func.now(),
+    )

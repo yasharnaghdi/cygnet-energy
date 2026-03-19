@@ -97,6 +97,19 @@ st.set_page_config(
 
 logger = logging.getLogger(__name__)
 
+def _load_local_env_file() -> None:
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_local_env_file()
+
 if "active_page" not in st.session_state:
     st.session_state["active_page"] = "Generation Analytics"
 
@@ -620,6 +633,28 @@ def get_eia_total_states_from_facet():
         return None
 
 
+@st.cache_data(ttl=3600)
+def get_eia_states_from_facet():
+    try:
+        from src.services.eia_adapter import EIAAdapter
+
+        return EIAAdapter().fetch_retail_state_ids()
+    except Exception:
+        return []
+
+
+def merge_region_options(*collections):
+    merged = []
+    seen = set()
+    for collection in collections:
+        for value in collection or []:
+            item = str(value).strip().upper()
+            if item and item not in seen:
+                seen.add(item)
+                merged.append(item)
+    return sorted(merged)
+
+
 def table_has_column(conn, table_name, column_name):
     with conn.cursor() as cur:
         cur.execute(
@@ -992,14 +1027,18 @@ except Exception:
 
 if is_eia_source:
     state_options = get_regions_from_api("eia")
+    db_state_options = []
     if sidebar_conn is not None:
         try:
-            if not state_options:
-                state_options = get_eia_states_from_db(sidebar_conn)
+            db_state_options = get_eia_states_from_db(sidebar_conn)
         except Exception:
-            state_options = []
-    if not state_options:
-        state_options = get_config_eia_states()
+            db_state_options = []
+    state_options = merge_region_options(
+        state_options,
+        db_state_options,
+        get_eia_states_from_facet(),
+        get_config_eia_states(),
+    )
     if not state_options:
         state_options = ["CA"]
     global_region = st.sidebar.selectbox(
@@ -3444,7 +3483,11 @@ def render_eia_retail_prices(default_state=None, start_date=None, end_date=None)
         return
 
     try:
-        states = get_eia_states_from_db(conn)
+        states = merge_region_options(
+            get_eia_states_from_db(conn),
+            get_eia_states_from_facet(),
+            get_config_eia_states(),
+        )
     except Exception as exc:
         st.error(f"Failed to load EIA state list: {exc}")
         return
@@ -3772,7 +3815,7 @@ def render_health_setup(country, coverage):
             st.success("EIA API key detected")
         else:
             st.warning("EIA API key missing")
-            st.caption("Add `EIA_API_KEY` to `.env` for EIA ingestion.")
+            st.caption("Add `EIA_API_KEY` to the env file for this runtime (`.env` locally, `.env.docker` in Docker).")
 
     with col3:
         try:

@@ -15,11 +15,10 @@ async def current_intensity(
     zone: CountryCode = Query(default=CountryCode.DE),
     token: TokenData = Depends(verify_token),
 ) -> dict:
-    del token
     conn = get_connection()
     try:
         service = CarbonIntensityService(conn)
-        current = service.get_current_intensity(zone.value)
+        current = service.get_current_intensity(zone.value, token.tenant_id)
     finally:
         conn.close()
 

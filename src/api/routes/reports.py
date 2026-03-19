@@ -25,7 +25,6 @@ from src.services.report_generator import (
     normalize_scenario_name,
     resolve_parameter_weights,
 )
-from src.utils.zones import get_zone_keys
 
 router = APIRouter(prefix="/api/reports", tags=["Reports"])
 logger = logging.getLogger(__name__)
@@ -155,6 +154,7 @@ def _resolve_model_name(backend: str, backend_info: dict[str, Any], requested_mo
 
 
 def _apply_history_scope(query: Any, token: TokenData) -> Any:
+    query = query.filter(ReportHistory.tenant_id == token.tenant_id)
     if auth_bypass_enabled():
         return query
     return query.join(ReportSession, ReportHistory.session_id == ReportSession.session_id).filter(
@@ -297,7 +297,12 @@ def _format_hour_list(values: list[datetime], limit: int = 6) -> str:
     return ", ".join(rendered)
 
 
-def _query_records_tables(cur: psycopg2.extensions.cursor, zone: str, hours: int) -> list[dict[str, Any]]:
+def _query_records_tables(
+    cur: psycopg2.extensions.cursor,
+    zone: str,
+    hours: int,
+    tenant_id: Any,
+) -> list[dict[str, Any]]:
     cur.execute(
         """
         SELECT
@@ -310,72 +315,32 @@ def _query_records_tables(cur: psycopg2.extensions.cursor, zone: str, hours: int
             p.price_eur_mwh
         FROM generation_records g
         LEFT JOIN load_records l
-            ON l.zone = g.zone AND l.timestamp = g.timestamp
+            ON l.tenant_id = g.tenant_id
+           AND l.zone = g.zone
+           AND l.timestamp = g.timestamp
         LEFT JOIN price_records p
-            ON p.zone = g.zone AND p.timestamp = g.timestamp
+            ON p.tenant_id = g.tenant_id
+           AND p.zone = g.zone
+           AND p.timestamp = g.timestamp
         WHERE g.zone = %s
+          AND g.tenant_id = %s
           AND g.timestamp >= NOW() - make_interval(hours => %s)
         ORDER BY g.timestamp ASC
         """,
-        (zone, hours),
+        (zone, tenant_id, hours),
     )
     rows = cur.fetchall()
     return [dict(row) for row in rows]
 
 
-def _query_legacy_tables(cur: psycopg2.extensions.cursor, zone: str, hours: int) -> list[dict[str, Any]]:
-    zone_keys = get_zone_keys(zone)
-    cur.execute(
-        """
-        WITH generation_hourly AS (
-            SELECT
-                time AS timestamp,
-                SUM(CASE WHEN psr_type IN ('B19', 'B20') THEN actual_generation_mw ELSE 0 END) AS wind_mw,
-                SUM(CASE WHEN psr_type IN ('B17', 'B18') THEN actual_generation_mw ELSE 0 END) AS solar_mw,
-                SUM(CASE WHEN psr_type IN ('B10', 'B11', 'B12') THEN actual_generation_mw ELSE 0 END) AS hydro_mw,
-                SUM(actual_generation_mw) AS total_mw
-            FROM generation_actual
-            WHERE bidding_zone_mrid = ANY(%s)
-              AND time >= NOW() - make_interval(hours => %s)
-            GROUP BY time
-        ),
-        load_hourly AS (
-            SELECT
-                time AS timestamp,
-                SUM(load_consumption_mw) AS load_mw
-            FROM load_actual
-            WHERE bidding_zone_mrid = ANY(%s)
-              AND time >= NOW() - make_interval(hours => %s)
-            GROUP BY time
-        )
-        SELECT
-            g.timestamp,
-            g.wind_mw,
-            g.solar_mw,
-            g.hydro_mw,
-            g.total_mw,
-            l.load_mw,
-            NULL::DOUBLE PRECISION AS price_eur_mwh
-        FROM generation_hourly g
-        LEFT JOIN load_hourly l ON l.timestamp = g.timestamp
-        ORDER BY g.timestamp ASC
-        """,
-        (zone_keys, hours, zone_keys, hours),
-    )
-    rows = cur.fetchall()
-    return [dict(row) for row in rows]
-
-
-def _fetch_hourly_rows(cur: psycopg2.extensions.cursor, zone: str, hours: int) -> list[dict[str, Any]]:
+def _fetch_hourly_rows(
+    cur: psycopg2.extensions.cursor,
+    zone: str,
+    hours: int,
+    tenant_id: Any,
+) -> list[dict[str, Any]]:
     try:
-        rows = _query_records_tables(cur, zone, hours)
-        if rows:
-            return rows
-    except Exception:
-        pass
-
-    try:
-        rows = _query_legacy_tables(cur, zone, hours)
+        rows = _query_records_tables(cur, zone, hours, tenant_id)
         if rows:
             return rows
     except Exception:
@@ -633,6 +598,7 @@ def _generate_report_impl(
     backend: BackendType | None,
     model: str | None,
     session_context: dict[str, Any] | None = None,
+    tenant_id: Any = None,
 ) -> ReportResponse:
     started = perf_counter()
     context_for_prompt = _context_dict(session_context)
@@ -656,8 +622,8 @@ def _generate_report_impl(
         conn = get_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
-            rows_24h = _fetch_hourly_rows(cur, normalized_zone, hours=24)
-            rows_7d = _fetch_hourly_rows(cur, normalized_zone, hours=24 * 7)
+            rows_24h = _fetch_hourly_rows(cur, normalized_zone, hours=24, tenant_id=tenant_id)
+            rows_7d = _fetch_hourly_rows(cur, normalized_zone, hours=24 * 7, tenant_id=tenant_id)
         finally:
             cur.close()
             conn.close()
@@ -760,6 +726,7 @@ def _save_report_history(request: ReportRequest, response: ReportResponse, token
         report_id = str(uuid.uuid4())
 
         record = ReportHistory(
+            tenant_id=token.tenant_id,
             session_id=session_id,
             report_id=report_id,
             persona=response.persona,
@@ -829,6 +796,7 @@ async def generate_report(request: ReportRequest, token: TokenData = Depends(ver
             backend=request.backend,
             model=request.model,
             session_context=context_inputs["session_context"],
+            tenant_id=token.tenant_id,
         )
 
         if request.save_history:
@@ -997,7 +965,6 @@ async def generate_report_legacy_get(
     tight_margin_mw: int = Query(default=1500, ge=100, le=10000),
     token: TokenData = Depends(verify_token),
 ) -> ReportResponse:
-    del token
     try:
         return _generate_report_impl(
             persona=persona,
@@ -1009,6 +976,7 @@ async def generate_report_legacy_get(
             parameter_weights=None,
             backend=None,
             model=None,
+            tenant_id=token.tenant_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

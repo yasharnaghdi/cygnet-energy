@@ -4,12 +4,13 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote_plus
+from uuid import UUID
 
 from prometheus_client import Gauge, Histogram
 
 from src.api.client import EntsoEAPIClient
 from src.api.parser import EntsoEXMLParser
-from src.db.connection import load_config
+from src.db.connection import database_url as resolve_database_url, load_config
 
 DATA_FRESHNESS = Gauge(
     "cygnet_data_freshness_seconds",
@@ -42,7 +43,13 @@ class EntsoEIngestionService:
         self.api_client = api_client or EntsoEAPIClient()
         self._session_factory = session_factory
 
-    def fetch_and_store(self, zone: str, start: datetime, end: datetime) -> dict[str, Any]:
+    def fetch_and_store(
+        self,
+        zone: str,
+        start: datetime,
+        end: datetime,
+        tenant_id: UUID,
+    ) -> dict[str, Any]:
         start = _as_utc(start)
         end = _as_utc(end)
 
@@ -53,8 +60,8 @@ class EntsoEIngestionService:
             generation_df = EntsoEXMLParser.parse_generation_xml(generation_xml) if generation_xml else None
             load_df = EntsoEXMLParser.parse_load_xml(load_xml) if load_xml else None
 
-            generation_records = self._build_generation_records(zone, generation_df)
-            load_records = self._build_load_records(zone, load_df)
+            generation_records = self._build_generation_records(zone, generation_df, tenant_id)
+            load_records = self._build_load_records(zone, load_df, tenant_id)
 
             generation_inserted, load_inserted, freshest = self._persist(generation_records, load_records)
 
@@ -97,7 +104,7 @@ class EntsoEIngestionService:
         finally:
             session.close()
 
-    def _build_generation_records(self, zone: str, df: Any) -> list[dict[str, Any]]:
+    def _build_generation_records(self, zone: str, df: Any, tenant_id: UUID) -> list[dict[str, Any]]:
         if df is None or df.empty:
             return []
 
@@ -112,6 +119,7 @@ class EntsoEIngestionService:
             total_mw = float(frame["actual_generation_mw"].sum())
             rows.append(
                 {
+                    "tenant_id": tenant_id,
                     "zone": zone,
                     "timestamp": timestamp,
                     "wind_mw": wind_mw,
@@ -122,7 +130,7 @@ class EntsoEIngestionService:
             )
         return rows
 
-    def _build_load_records(self, zone: str, df: Any) -> list[dict[str, Any]]:
+    def _build_load_records(self, zone: str, df: Any, tenant_id: UUID) -> list[dict[str, Any]]:
         if df is None or df.empty:
             return []
 
@@ -133,6 +141,7 @@ class EntsoEIngestionService:
         for timestamp, frame in working.groupby("time"):
             rows.append(
                 {
+                    "tenant_id": tenant_id,
                     "zone": zone,
                     "timestamp": timestamp,
                     "load_mw": float(frame[load_column].sum()),
@@ -147,6 +156,7 @@ class EntsoEIngestionService:
 
         stmt = insert(GenerationRecord).values(records)
         update_map = {
+            "tenant_id": stmt.excluded.tenant_id,
             "wind_mw": stmt.excluded.wind_mw,
             "solar_mw": stmt.excluded.solar_mw,
             "hydro_mw": stmt.excluded.hydro_mw,
@@ -166,7 +176,10 @@ class EntsoEIngestionService:
         stmt = insert(LoadRecord).values(records)
         stmt = stmt.on_conflict_do_update(
             index_elements=["zone", "timestamp"],
-            set_={"load_mw": stmt.excluded.load_mw},
+            set_={
+                "tenant_id": stmt.excluded.tenant_id,
+                "load_mw": stmt.excluded.load_mw,
+            },
         )
         session.execute(stmt)
 
@@ -184,7 +197,7 @@ class EntsoEIngestionService:
     def _database_url(self) -> str:
         database_url = os.getenv("DATABASE_URL")
         if database_url:
-            return database_url
+            return resolve_database_url()
 
         cfg = load_config()["database"]
         user = quote_plus(str(cfg["user"]))

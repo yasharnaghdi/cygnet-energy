@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 import psycopg2.extras
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from src.api.middleware.auth import verify_token
 from src.api.models.schemas import (
@@ -27,6 +27,7 @@ def _to_utc(value: datetime) -> datetime:
 
 @router.get("/indicators", response_model=List[IndicatorPackageResponse])
 async def get_indicator_packages(
+    request: Request,
     zone: CountryCode = Query(default=CountryCode.DE),
     start: Optional[datetime] = Query(default=None),
     end: Optional[datetime] = Query(default=None),
@@ -36,28 +37,63 @@ async def get_indicator_packages(
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     zone_keys = get_zone_keys(zone.value)
-    start_clause = "AND timestamp_utc >= %s" if start else ""
-    end_clause = "AND timestamp_utc <= %s" if end else ""
+    tenant_id = request.state.tenant_id
+    start_clause = "AND timestamp >= %s" if start else ""
+    end_clause = "AND timestamp <= %s" if end else ""
 
     query = f"""
+        WITH base AS (
+            SELECT
+                timestamp AS timestamp_utc,
+                zone AS region_id,
+                total_mw,
+                (
+                    (
+                        GREATEST(total_mw - COALESCE(wind_mw, 0) - COALESCE(solar_mw, 0) - COALESCE(hydro_mw, 0), 0) * 490
+                        + COALESCE(wind_mw, 0) * 11
+                        + COALESCE(solar_mw, 0) * 41
+                        + COALESCE(hydro_mw, 0) * 24
+                    ) / NULLIF(total_mw, 0)
+                ) AS carbon_intensity,
+                (
+                    GREATEST(total_mw - COALESCE(wind_mw, 0) - COALESCE(solar_mw, 0) - COALESCE(hydro_mw, 0), 0)
+                    / NULLIF(total_mw, 0) * 100.0
+                ) AS fossil_share
+            FROM generation_records
+            WHERE zone = ANY(%s)
+              AND tenant_id = %s
+              {start_clause}
+              {end_clause}
+              AND total_mw > 0
+        ),
+        metrics AS (
+            SELECT
+                timestamp_utc,
+                region_id,
+                carbon_intensity,
+                fossil_share,
+                STDDEV_SAMP(carbon_intensity) OVER (
+                    PARTITION BY region_id
+                    ORDER BY timestamp_utc
+                    ROWS BETWEEN 23 PRECEDING AND CURRENT ROW
+                ) AS volatility
+            FROM base
+        )
         SELECT
             timestamp_utc,
-            region_type,
+            'zone'::text AS region_type,
             region_id,
-            granularity,
+            'hour'::text AS granularity,
             carbon_intensity,
             fossil_share,
             volatility,
-            clean_window
-        FROM indicator_packages_v1
-        WHERE region_id = ANY(%s)
-        {start_clause}
-        {end_clause}
+            (carbon_intensity <= 200) AS clean_window
+        FROM metrics
         ORDER BY timestamp_utc DESC
         LIMIT %s
     """
 
-    params = [zone_keys]
+    params = [zone_keys, tenant_id]
     if start:
         params.append(_to_utc(start))
     if end:
@@ -77,6 +113,7 @@ async def get_indicator_packages(
 
 @router.get("/regions", response_model=List[RegionResponse])
 async def get_regions(
+    request: Request,
     source: RegionSource = Query(default=RegionSource.entsoe),
 ) -> List[RegionResponse]:
     if source == RegionSource.entsoe:
@@ -92,11 +129,13 @@ async def get_regions(
             """
             SELECT DISTINCT region_id
             FROM canonical_metrics
-            WHERE source = 'EIA'
+            WHERE tenant_id = %s
+              AND source = 'EIA'
               AND dataset = 'electricity/retail-sales'
               AND metric_name = 'retail_price'
             ORDER BY region_id
-            """
+            """,
+            (request.state.tenant_id,),
         )
         rows = cur.fetchall()
     finally:
